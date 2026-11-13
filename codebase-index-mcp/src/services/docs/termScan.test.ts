@@ -107,3 +107,20 @@ test("MCP-ISSUE-131: a withheld 'building' usages block says how to get the full
   assert.equal(breach.status, "cap_breach");
   assert.equal("next" in breach, false, "only a build in progress promises a later answer");
 });
+
+test("MCP-ISSUE-131 review: a file two nested repos share keeps each repo's relative path", async () => {
+  const io = fakeIo({ "/ws/server/src/a.ts": { text: ZOD("alpha_id") } });
+  const scanner = new SchemaKeyScanner(io);
+  const outer = await scanner.scan("ws", [{ relative: "server/src/a.ts", absolute: "/ws/server/src/a.ts" }]);
+  const inner = await scanner.scan("server", [{ relative: "src/a.ts", absolute: "/ws/server/src/a.ts" }]);
+  assert.equal(outer.keys[0]!.filePath, "server/src/a.ts");
+  assert.equal(inner.keys[0]!.filePath, "src/a.ts", "not the outer repo's spelling from the cache");
+});
+
+test("MCP-ISSUE-131 review: concurrent scans of one repo with different file lists of the same length do not share a pass", async () => {
+  const io = fakeIo({ "/r/a.ts": { text: ZOD("alpha_id") }, "/r/b.ts": { text: ZOD("beta_id") } });
+  const scanner = new SchemaKeyScanner(io);
+  const [one, two] = await Promise.all([scanner.scan("r", list(["a.ts"])), scanner.scan("r", list(["b.ts"]))]);
+  assert.deepEqual(one.keys.map((k) => k.key), ["alpha_id"]);
+  assert.deepEqual(two.keys.map((k) => k.key), ["beta_id"]);
+});

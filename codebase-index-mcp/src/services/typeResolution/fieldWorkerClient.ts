@@ -73,12 +73,11 @@ type Pending = {
   key: string;
   field: string;
   budgetMs: number;
-  /** The program the request asks about, as {@link programKey} spells it — what `isWarm` keys on. */
-  program: string;
+  /** The program the request asks about — what `isWarm` keys on. */
+  repoId: string;
+  repoPath: string;
   waiters: Set<Waiter>;
 };
-
-const programKey = (repoId: string, repoPath: string): string => `${repoId}\u0000${repoPath}`;
 
 /** The production spawner: `fieldWorker.js` beside this file, heap-capped at the memory cap. */
 export const spawnFieldWorker: SpawnWorker = (caps) =>
@@ -101,13 +100,19 @@ export class FieldWorkerClient {
   private current: { id: number; repoId: string; cold: boolean; startedAt: number } | null = null;
   private watchdog: NodeJS.Timeout | null = null;
   /**
-   * MCP-ISSUE-131: the programs the worker holds built, mirroring its LRU in request order (oldest first). A program is
-   * warm once the worker has ANSWERED a request for it (anything but a withheld or breach answer). Posting a request for
-   * a program evicts the oldest past {@link WORKER_CACHED_HOSTS}, as the worker does; losing the worker forgets them
-   * all. A changed index run refreshes the program in place (only changed files re-parse), so it stays warm.
+   * MCP-ISSUE-131: the programs the worker holds built, mirroring its LRU (`getRepoLanguageService`: keyed by repoId, a
+   * changed repoPath rebuilds cold) in posting order, oldest first — the worker takes requests in that order. A program
+   * is warm once the worker has ANSWERED a request for it (anything but a withheld or breach answer) and it is still in
+   * the LRU at its last-posted path. Posting a request evicts the oldest repo past {@link WORKER_CACHED_HOSTS}; losing
+   * the worker forgets them all. A changed index run refreshes the program in place, so it stays warm.
    */
   private readonly lru: string[] = [];
-  private readonly warm = new Set<string>();
+  /** repoId → the repoPath last posted for it (the program the worker holds or is building for that repo). */
+  private readonly posted = new Map<string, string>();
+  /** repoId → repoPath of a program built and still held. */
+  private readonly warm = new Map<string, string>();
+  /** repoId → id of the posted request at which the worker drops that repo's program (evicted or re-pointed). */
+  private readonly droppedAt = new Map<string, number>();
   /** Times the worker has been spawned — exposed for tests and the live check. */
   spawned = 0;
   private spawnedAt: number | null = null;
@@ -131,9 +136,9 @@ export class FieldWorkerClient {
         return Promise.resolve(this.withheld(query.field, { kind: "building", detail: `${this.busyNote()}; ${String(this.pending.size)} other field queries are already queued` }, started));
       }
       const worker = this.ensureWorker(query.caps);
-      entry = { id: this.nextId++, key, field: query.field, budgetMs: query.caps.budgetMs, program: programKey(query.program.repoId, query.program.repoPath), waiters: new Set() };
+      entry = { id: this.nextId++, key, field: query.field, budgetMs: query.caps.budgetMs, repoId: query.program.repoId, repoPath: query.program.repoPath, waiters: new Set() };
       this.pending.set(entry.id, entry);
-      this.touch(entry.program);
+      this.touch(entry.repoId, entry.repoPath, entry.id);
       worker.postMessage({ id: entry.id, program: query.program, field: query.field, pick: query.pick, caps: query.caps });
     }
     const target = entry;
@@ -165,15 +170,36 @@ export class FieldWorkerClient {
    * A caller for whom the answer is optional (query_docs term usages) waits the full budget only then.
    */
   isWarm(repoId: string, repoPath: string): boolean {
-    return this.worker !== null && this.warm.has(programKey(repoId, repoPath));
+    return this.worker !== null && this.warm.get(repoId) === repoPath;
   }
 
-  /** The worker's LRU as this side models it: `program` becomes the most recent; the oldest past the cap is dropped. */
-  private touch(program: string): void {
-    const at = this.lru.indexOf(program);
+  /** The worker's LRU as this side models it: `repoId` becomes the most recent; the oldest past the cap is dropped. */
+  private touch(repoId: string, repoPath: string, requestId: number): void {
+    // Another path for the same repoId: the worker drops the held program and builds this one cold.
+    const was = this.posted.get(repoId);
+    if (was !== undefined && was !== repoPath) {
+      this.warm.delete(repoId);
+      this.droppedAt.set(repoId, requestId);
+    }
+    this.posted.set(repoId, repoPath);
+    const at = this.lru.indexOf(repoId);
     if (at >= 0) this.lru.splice(at, 1);
-    this.lru.push(program);
-    while (this.lru.length > WORKER_CACHED_HOSTS) this.warm.delete(this.lru.shift()!);
+    this.lru.push(repoId);
+    while (this.lru.length > WORKER_CACHED_HOSTS) {
+      const evicted = this.lru.shift()!;
+      this.warm.delete(evicted);
+      this.posted.delete(evicted);
+      this.droppedAt.set(evicted, requestId);
+    }
+  }
+
+  /**
+   * An answer leaves the program built and held only when no LATER posted request drops it. A re-pointing request drops
+   * the old program at its own id and then builds the new one, so its own answer counts (`<=`); an eviction is always
+   * recorded at another repo's request.
+   */
+  private heldAfter(entry: Pending): boolean {
+    return this.posted.get(entry.repoId) === entry.repoPath && (this.droppedAt.get(entry.repoId) ?? 0) <= entry.id;
   }
 
   get outstanding(): number {
@@ -211,7 +237,8 @@ export class FieldWorkerClient {
       for (const w of waiters) w.settle?.(this.withheld(entry!.field, { kind: "worker", detail: message.error }, w.startedAt));
     } else {
       const answer = message.answer;
-      if (entry && answer.status !== "cap_breach") this.warm.add(entry.program);
+      // Review: a program evicted or re-pointed by requests posted after this one is not warm, whatever it answered.
+      if (entry && answer.status !== "cap_breach" && this.heldAfter(entry)) this.warm.set(entry.repoId, entry.repoPath);
       const mainHeapMb = Math.round(process.memoryUsage().heapUsed / MB);
       for (const w of waiters) {
         w.settle?.({ ...answer, meta: { ...answer.meta, mainHeapMb, roundTripMs: Math.round(performance.now() - w.startedAt) } } as FieldAnswer);
@@ -244,7 +271,9 @@ export class FieldWorkerClient {
   private discard(reason: FieldWithheld): void {
     this.worker = null;
     this.lru.length = 0;
+    this.posted.clear();
     this.warm.clear();
+    this.droppedAt.clear();
     this.current = null;
     this.clearWatchdog();
     const entries = [...this.pending.values()];

@@ -150,3 +150,47 @@ test("MCP-ISSUE-131: asking about more repos than the worker caches evicts the l
   assert.ok(client.isWarm("a", "/a") && client.isWarm("c", "/c"));
   await client.dispose();
 });
+
+/** Post a request for `repoId` at `repoPath` without answering it; the caller answers by request index. */
+function post(client: FieldWorkerClient, repoId: string, repoPath = `/${repoId}`, field = `f_${repoId}`): Promise<FieldAnswer> {
+  const q = query(field, 1_000);
+  return client.ask({ ...q, program: { ...q.program, repoId, repoPath } });
+}
+
+test("MCP-ISSUE-131 review: a program evicted by requests posted after it is not warm when its answer lands", async () => {
+  const { client, workers } = harness();
+  const a = post(client, "a");
+  const b = post(client, "b");
+  const c = post(client, "c");
+  const w = workers[0]!;
+  w.send({ type: "answer", id: w.requests[0]!.id, answer: okAnswer("f_a") });
+  await a;
+  assert.equal(client.isWarm("a", "/a"), false, "posting c evicted a in the worker");
+  const a2 = post(client, "a", "/a", "f_a2");
+  w.send({ type: "answer", id: w.requests[1]!.id, answer: okAnswer("f_b") });
+  w.send({ type: "answer", id: w.requests[2]!.id, answer: okAnswer("f_c") });
+  await Promise.all([b, c]);
+  assert.equal(client.isWarm("b", "/b"), false, "posting a again evicted b");
+  assert.equal(client.isWarm("c", "/c"), true);
+  assert.equal(client.isWarm("a", "/a"), false, "a is being rebuilt, not yet answered");
+  w.send({ type: "answer", id: w.requests[3]!.id, answer: okAnswer("f_a2") });
+  await a2;
+  assert.equal(client.isWarm("a", "/a"), true);
+  await client.dispose();
+});
+
+test("MCP-ISSUE-131 review: a repoId re-pointed to another path is cold at both paths until the new one answers", async () => {
+  const { client, workers } = harness();
+  const w = (): FakeWorker => workers[0]!;
+  const first = post(client, "r", "/old");
+  w().send({ type: "answer", id: w().requests[0]!.id, answer: okAnswer("f_r") });
+  await first;
+  assert.equal(client.isWarm("r", "/old"), true);
+  const moved = post(client, "r", "/new", "f_r2");
+  assert.equal(client.isWarm("r", "/old"), false, "the worker drops the old program");
+  assert.equal(client.isWarm("r", "/new"), false);
+  w().send({ type: "answer", id: w().requests[1]!.id, answer: okAnswer("f_r2") });
+  await moved;
+  assert.equal(client.isWarm("r", "/new"), true);
+  await client.dispose();
+});

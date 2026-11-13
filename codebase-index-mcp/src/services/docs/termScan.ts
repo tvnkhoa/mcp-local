@@ -8,6 +8,7 @@
  * by mtime+size, so a warm call is the stats alone; concurrent callers for one repo share one scan.
  */
 
+import { createHash } from "node:crypto";
 import fs from "node:fs/promises";
 
 import type { FieldWithheld } from "../typeResolution/fieldReferences.js";
@@ -64,9 +65,11 @@ export class SchemaKeyScanner {
     private readonly opts: { concurrency?: number; cacheMax?: number; maxFiles?: number; maxBytes?: number } = {}
   ) {}
 
-  /** Keys in `files` order. A second call for the same repo while one runs joins it. */
+  /** Keys in `files` order. A second call for the same repo and the same file list while one runs joins it. */
   scan(scopeKey: string, files: readonly TermScanFile[]): Promise<TermScanResult> {
-    const key = `${scopeKey}\u0000${String(files.length)}`;
+    const list = createHash("sha1");
+    for (const f of files) list.update(f.absolute).update("\u0000").update(f.relative).update("\u0001");
+    const key = `${scopeKey}\u0000${list.digest("hex")}`;
     const running = this.inflight.get(key);
     if (running) return running;
     const started = this.run(files).finally(() => {
@@ -93,14 +96,17 @@ export class SchemaKeyScanner {
         try {
           const st = await this.io.stat(file.absolute);
           if (st.size > maxBytes) continue;
-          const cached = this.cache.get(file.absolute);
+          // The keys carry the repo-relative path, so a file two registered repos share (mcp-local holds
+          // codebase-index-mcp) is cached once per repo-relative spelling.
+          const cacheKey = `${file.absolute}\u0000${file.relative}`;
+          const cached = this.cache.get(cacheKey);
           if (cached && cached.mtimeMs === st.mtimeMs && cached.size === st.size) {
-            this.remember(file.absolute, cached);
+            this.remember(cacheKey, cached);
             perFile[at] = cached.keys;
             continue;
           }
           const keys = schemaKeys(await this.io.readFile(file.absolute), file.relative);
-          this.remember(file.absolute, { mtimeMs: st.mtimeMs, size: st.size, keys });
+          this.remember(cacheKey, { mtimeMs: st.mtimeMs, size: st.size, keys });
           perFile[at] = keys;
         } catch {
           continue;
@@ -119,9 +125,9 @@ export class SchemaKeyScanner {
     return { keys, filesScanned, capped: all.length > maxFiles };
   }
 
-  private remember(absolute: string, entry: Entry): void {
-    this.cache.delete(absolute);
-    this.cache.set(absolute, entry);
+  private remember(cacheKey: string, entry: Entry): void {
+    this.cache.delete(cacheKey);
+    this.cache.set(cacheKey, entry);
     const max = this.opts.cacheMax ?? TERM_SCAN_CACHE_MAX;
     while (this.cache.size > max) this.cache.delete(this.cache.keys().next().value as string);
   }

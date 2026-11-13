@@ -389,34 +389,39 @@ test("FULL_BASE_LOOKBACK mirrors runPolicy's GIT_SCOPE_RUN_LOOKBACK", () => {
   assert.equal(FULL_BASE_LOOKBACK, GIT_SCOPE_RUN_LOOKBACK);
 });
 
-test("MCP-ISSUE-130 (2): a seed over a new-version incremental base on an older full build carries the full build's version, so the child escalates", withTmp(async (dir) => {
-  const repo = makeRepo();
-  try {
-    const dbPath = path.join(dir, "g.db");
-    await fullIndex(dbPath, "parent", repo);
-    // The 339b6b3a shape: the full build is v-old; a later incremental (the seed's base) is stamped with this server's version.
-    rawDb(dbPath, (db) => {
-      db.prepare(`update index_runs set index_version = 'v1-old-build' where repo_id = 'parent' and mode = 'full'`).run();
-      addRunLike(db, "parent", { run_id: "incr-new", mode: "incremental", status: "ok", index_version: INDEX_VERSION, started_at: "2999-01-01T00:00:00.000Z", finished_at: "2999-01-01T00:00:01.000Z", skip_reason: null });
-    });
-    const store = new GraphStore(dbPath);
+for (const [label, fullVersion, baseVersion] of [
+  ["an older full build under this server's incremental (wec.aria 339b6b3a)", "v1-old-build", INDEX_VERSION],
+  ["this server's full build under a newer build's incremental (review finding 1)", INDEX_VERSION, "v999-newer-build"]
+] as const) {
+  test(`MCP-ISSUE-130 (2): a parent whose rows mix index versions is not vouched for — ${label}; PARENT_UNVOUCHED, nothing written`, withTmp(async (dir) => {
+    const repo = makeRepo();
     try {
-      assert.notEqual(versionEscalationFor(store, "parent"), null, "the parent itself escalates");
-      seedFromParent(store, { parentRepoId: "parent", childRepoId: "seeded", childRepoPath: slash(repo) });
-      const seedRow = rawDb(dbPath, (db) => db.prepare(`select mode, index_version as v, commit_sha as sha from index_runs where repo_id = 'seeded'`).get()) as { mode: string; v: string | null; sha: string };
-      assert.equal(seedRow.mode, "seed");
-      assert.equal(seedRow.v, "v1-old-build", "the version that built the copied rows, not the base run's");
-      assert.ok(seedRow.sha, "the commit still comes from the base run");
-      assert.match(versionEscalationFor(store, "seeded") ?? "", /last fully built by v1-old-build/, "the child's next run is full");
+      const dbPath = path.join(dir, "g.db");
+      await fullIndex(dbPath, "parent", repo);
+      rawDb(dbPath, (db) => {
+        db.prepare(`update index_runs set index_version = ? where repo_id = 'parent' and mode = 'full'`).run(fullVersion);
+        addRunLike(db, "parent", { run_id: "incr-base", mode: "incremental", status: "ok", index_version: baseVersion, started_at: "2999-01-01T00:00:00.000Z", finished_at: "2999-01-01T00:00:01.000Z", skip_reason: null });
+      });
+      const store = new GraphStore(dbPath);
+      try {
+        const reason = new RegExp(`mix index versions \\(fully built by ${fullVersion}, last complete run by ${baseVersion}\\)`);
+        assert.match(store.seedRefusal("parent") ?? "", reason, "refused before the ancestry check, so the job runs full at once");
+        assert.equal(store.seedBaseSha("parent"), null);
+        assert.throws(
+          () => seedFromParent(store, { parentRepoId: "parent", childRepoId: "seeded", childRepoPath: slash(repo) }),
+          (e: unknown) => e instanceof SeedError && e.code === "PARENT_UNVOUCHED" && reason.test(e.message)
+        );
+      } finally {
+        store.close();
+      }
+      for (const [table, list] of Object.entries(rows(dbPath, "seeded"))) assert.equal(list.length, 0, `${table}: nothing seeded`);
     } finally {
-      store.close();
+      rmSync(repo, { recursive: true, force: true });
     }
-  } finally {
-    rmSync(repo, { recursive: true, force: true });
-  }
-}));
+  }));
+}
 
-test("MCP-ISSUE-130 (2): a seed from a parent fully built by this version carries it, and the child does not escalate", withTmp(async (dir) => {
+test("MCP-ISSUE-130 (2): a seed whose base run and full build agree on this version carries it; the child does not escalate", withTmp(async (dir) => {
   const repo = makeRepo();
   try {
     const dbPath = path.join(dir, "g.db");

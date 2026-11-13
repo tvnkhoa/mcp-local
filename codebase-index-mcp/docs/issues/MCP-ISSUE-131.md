@@ -35,13 +35,18 @@
   - (a) `services/docs/termScan.ts` `SchemaKeyScanner`:
     - Async `stat`/`readFile`, at most 16 files at a time. The event loop stays free, and the opens overlap: measured
       1 → 7.4 s, 8 → 1.9 s, 32 → 1.7 s.
-    - Per-file keys are cached by mtime+size in an LRU of 50 000 files, shared by every repo.
-    - Concurrent scans of one repo share one pass.
+    - Per-file keys are cached by mtime+size in an LRU of 50 000 files, shared by every repo. The cache key is the
+      absolute path plus the repo-relative one, because the keys carry the relative path and nested registered repos
+      (`mcp-local` holds `codebase-index-mcp`) spell one file two ways. Review finding; the old cache had the same bug.
+    - Concurrent scans of one repo with the same file list (hashed) share one pass.
     - The handler keeps the path guard (`assertSafeRepoFilePath`) and the test-path filter.
   - (b) `fieldWorkerClient.ts` `isWarm(repoId, repoPath)`:
-    - A program counts as warm once the worker has answered a request for it with anything other than a breach.
-    - It mirrors the worker's 2-host LRU (`WORKER_CACHED_HOSTS` = `MAX_CACHED_HOSTS`, asserted by a test) and is
-      forgotten when the worker is lost.
+    - A program counts as warm once the worker has answered a request for it with anything other than a breach, and no
+      request posted after that one dropped it. The worker takes requests in posting order.
+    - It mirrors the worker's 2-host LRU (`WORKER_CACHED_HOSTS` = `MAX_CACHED_HOSTS`, asserted by a test), keyed by
+      repoId as the worker's is. A request at another repoPath drops the program; posting a third repo evicts the
+      oldest. The mirror is forgotten when the worker is lost.
+    - A false "warm" costs only the old 5 s wait; a false "cold" costs only a `building` answer.
     - `exactFieldAnswer(…, { coldWaitMs })` caps the wait when the program is not warm. Term passes
       `TERM_USAGES_COLD_WAIT_MS` = 500 ms, so a small repo still answers in time.
     - `find_field_accesses` is unchanged: it still waits up to the full budget.
@@ -61,6 +66,6 @@
     schema change). A restart would then cost the stats alone (~50 ms for 1 656 files).
   - Alternatives: schema keys stored at index time (a migration and a full re-index), or reading only the files whose
     indexed content hash changed.
-- **Evidence:** unit tests `src/services/docs/termScan.test.ts` (7) and `fieldWorkerClient.test.ts` (+3); probes in
+- **Evidence:** unit tests `src/services/docs/termScan.test.ts` (9) and `fieldWorkerClient.test.ts` (+5); probes in
   `~/.claude/handover/briefs/2026-11-13-mcp-local-perf-docs-probes/`; evidence file
   `~/.claude/handover/briefs/2026-11-13-mcp-local-perf-docs-evidence.md`.
