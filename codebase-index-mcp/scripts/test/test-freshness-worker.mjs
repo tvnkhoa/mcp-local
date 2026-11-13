@@ -36,7 +36,18 @@ import "./_indexWait.mjs";
 const GENERATED_FILES = Number(process.env.FRESHNESS_WORKER_FIXTURE_FILES ?? 1500);
 const DIRTY_FILES = Number(process.env.FRESHNESS_WORKER_DIRTY_FILES ?? 300);
 const BUDGET_MS = 300;
-const BLOCK_MS = 250;
+// Load-aware bound (row #19, 2026-11-13). Alone 17/17 green, but inside a local --changed suite (6208ca9) one tick was
+// 296 ms late and one list_repositories probe took 307 ms — the setup's full run of `big` took 10.7 s there. The bound
+// is calibrated on that setup run, measured in this process on this machine just before the window:
+// max(BLOCK_FLOOR_MS, BLOCK_PER_SETUP_RUN × setup run ms). The suite case gives 0.035 × 10.7 s = 375 ms; solo on the
+// same (shared) machine the setup run took 10.5-13.3 s, so the bound sat at 366-466 ms there too — on a machine whose
+// setup run is under 7.1 s it is the 250 ms floor. A refresh back on the server thread blocks for whole run phases
+// (seconds), far above it.
+// FRESHNESS_WORKER_BLOCK_MS pins the bound. Negative control: FRESHNESS_WORKER_INJECT_BLOCK_MS=<ms> makes the server
+// busy-wait that long once inside the window (a preload watching a sentinel file); with <ms> >= 3x the bound, (b) FAILS.
+const BLOCK_FLOOR_MS = 250;
+const BLOCK_PER_SETUP_RUN = 0.035;
+const INJECT_BLOCK_MS = Number(process.env.FRESHNESS_WORKER_INJECT_BLOCK_MS ?? 0);
 
 let passed = 0, failed = 0;
 function assert(cond, label, detail = "") {
@@ -89,9 +100,24 @@ const dbPath = join(root, ".index", "index.db");
 mkdirSync(dirname(dbPath), { recursive: true });
 
 const sampler = pathToFileURL(resolve("scripts/test/_lagSampler.mjs")).href;
+const injectSentinel = join(root, "inject-block.now");
+const injectPreload = `data:text/javascript,${encodeURIComponent(`
+import fs from "node:fs";
+import { isMainThread } from "node:worker_threads";
+if (isMainThread) {
+  const t = setInterval(() => {
+    if (!fs.existsSync(${JSON.stringify(injectSentinel)})) return;
+    fs.rmSync(${JSON.stringify(injectSentinel)}, { force: true });
+    clearInterval(t);
+    const end = Date.now() + ${INJECT_BLOCK_MS};
+    while (Date.now() < end) { /* negative control: a synchronous block on the server thread */ }
+  }, 50);
+  t.unref();
+}
+`)}`;
 const transport = new StdioClientTransport({
   command: "node",
-  args: ["--import", sampler, "dist/index.js"],
+  args: ["--import", sampler, ...(INJECT_BLOCK_MS > 0 ? ["--import", injectPreload] : []), "dist/index.js"],
   env: {
     ...process.env,
     CODEBASE_INDEX_ALLOWED_ROOTS: root,
@@ -127,8 +153,10 @@ async function call(name, args) {
 }
 
 try {
+  let setupBigMs = 0;
   for (const [repoId, repoPath] of [[bigRepo, bigDir], [smallRepo, smallDir]]) {
     const r = await call("index_repository", { wait: true, repoId, repoPath, mode: "full" });
+    if (repoId === bigRepo) setupBigMs = r.ms;
     assert(r.body && !r.body.error && (r.body.filesIndexed ?? r.body.summary?.filesIndexed ?? 1) > 0, `index_repository ${repoId}`, r.text.slice(0, 200));
   }
   // Settle both: clean trees at the indexed HEAD, so neither query below starts a run of its own. IX-B: a read no longer
@@ -177,6 +205,7 @@ try {
   // measure what the REFRESH does to the server thread, not a tool's own synchronous work.
   const lightBig = { repoId: bigRepo, query: "fn_7_1", strategy: "name", limit: 5 };
   const first = await call("search_symbols", lightBig);
+  if (INJECT_BLOCK_MS > 0) writeFileSync(injectSentinel, "");
   console.log(`  info  first search on the dirty repo: ${first.ms} ms, freshness ${JSON.stringify(first.body?.freshness?.state ?? "fresh")}`);
   assert(first.ms < BUDGET_MS + 1000, "(a) the first query on the dirty repo answers within budget + 1 s", `${first.ms} ms`);
   const refreshing = first.body?.freshness?.state === "refreshing";
@@ -227,7 +256,9 @@ try {
   assert(heartbeats > 0, "(b) the lag sampler reported from inside the refresh window", `${String(heartbeats)} heartbeats`);
   const maxLag = Math.max(0, ...windowLags.map((l) => l.blockedMs));
   const maxProbe = Math.max(0, ...probes);
+  const BLOCK_MS = Number(process.env.FRESHNESS_WORKER_BLOCK_MS || Math.max(BLOCK_FLOOR_MS, Math.round(BLOCK_PER_SETUP_RUN * setupBigMs)));
   console.log(`  info  main-thread ticks late > 100 ms during the refresh: ${windowLags.length}, max ${maxLag} ms; list_repositories probes n=${probes.length}, max ${maxProbe} ms`);
+  console.log(`  info  bound ${BLOCK_MS} ms = ${process.env.FRESHNESS_WORKER_BLOCK_MS ? "FRESHNESS_WORKER_BLOCK_MS" : `max(${BLOCK_FLOOR_MS}, ${BLOCK_PER_SETUP_RUN} × setup run ${setupBigMs} ms)`}${INJECT_BLOCK_MS > 0 ? `; NEGATIVE CONTROL injected ${INJECT_BLOCK_MS} ms` : ""}`);
   assert(maxLag <= BLOCK_MS, `(b) no server main-thread block > ${BLOCK_MS} ms during the refresh`, JSON.stringify(windowLags.slice(0, 10)));
   assert(probes.length >= 5 && maxProbe < BLOCK_MS, `(b) a trivial tool answers in < ${BLOCK_MS} ms throughout`, `n=${probes.length} max=${maxProbe}`);
 } finally {

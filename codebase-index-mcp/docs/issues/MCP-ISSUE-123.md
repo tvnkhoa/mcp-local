@@ -27,6 +27,9 @@
   send it and terminate only after 60 s / 10 s.
 - **Tests:** `extractionWorkerPool.test.ts` (a child process times out a job mid-parse: red on 67e6ce3 = exit 0xC0000409,
   green after); `refreshWorkerClient.test.ts` (the exit request, never terminating a worker that honours it: red 3/15 on 67e6ce3).
+  2026-11-13 (row #19): its "second ok" failed as "second timeout" under a local suite (alone 7/7) — the job clock starts at
+  post, so the replacement worker's cold start fell inside the 300 ms. The second job now gets up to 5 tries, 1-3 s apart;
+  `POOL_NEGATIVE_CONTROL=1` (the fixture never answers it) keeps it red.
 
 ### B — the seed fallback reason (fixed)
 
