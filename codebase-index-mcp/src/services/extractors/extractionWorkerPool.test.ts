@@ -30,6 +30,7 @@ const parser = new Parser();
 parser.setLanguage(req("tree-sitter-typescript").typescript);
 parentPort.on("message", (message) => {
   if (message.type === "close") { parentPort.close(); return; }
+  if (process.env.POOL_NEGATIVE_CONTROL && message.input.source.length < 100) return; // never answers: the pool cannot serve
   const t = Date.now();
   parser.parse(message.input.source, undefined, { bufferSize: Buffer.byteLength(message.input.source) * 2 + 1 });
   parentPort.postMessage({ id: message.id, status: "ok", output: { symbols: [], edges: [] }, parseMs: Date.now() - t });
@@ -46,7 +47,21 @@ const big = chunk.repeat(12000); // ~2 MB: ~0.8 s of parse (solo), so the 300 ms
 const first = await pool.extract({ repoId: "t", filePath: "big.ts", language: "typescript", source: big });
 console.log("first " + first.status + " " + (first.reason ?? ""));
 await sleep(3000); // a terminate mid-parse kills the process inside this window
-const second = await pool.extract({ repoId: "t", filePath: "small.ts", language: "typescript", source: "export const a = 1;\\n" });
+// Row #19 (2026-11-13): the job clock starts when the job is posted, so the replacement worker's cold start (tree-sitter
+// load) falls inside the second job's 300 ms when the machine is loaded — "second timeout" under a local suite, 7/7 ok
+// alone. The claim is that the pool serves again after a retire, not that a cold worker loads in 300 ms on a busy
+// machine: up to SECOND_TRIES attempts, 1-3 s apart, each printed. A pool that never serves again fails all of them
+// (POOL_NEGATIVE_CONTROL=1: the fixture worker never answers the small job, so "second timeout").
+const SECOND_TRIES = 5;
+const tries = [];
+let second;
+for (let i = 0; i < SECOND_TRIES; i++) {
+  second = await pool.extract({ repoId: "t", filePath: "small.ts", language: "typescript", source: "export const a = 1;\\n" });
+  tries.push(second.status);
+  if (second.status === "ok" || i === SECOND_TRIES - 1) break;
+  await sleep(1000 * Math.min(3, i + 1));
+}
+console.log("second tries " + tries.join(","));
 console.log("second " + second.status);
 await pool.dispose();
 console.log("SURVIVED retiring=" + String(pool.retiringCount ?? "n/a"));
