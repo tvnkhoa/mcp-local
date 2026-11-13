@@ -7,6 +7,7 @@ import { CITATIONS_CONFIG_PATH, loadCitationConfig } from "../../services/docs/c
 import { findCitations } from "../../services/docs/annotationScanner.js";
 import { CitationResolver } from "../../services/docs/citationResolver.js";
 import { ownerMatchesSection, registryEntries, reverseReport } from "../../services/docs/termLookup.js";
+import { freshnessStateDir } from "../../middleware/freshness.js";
 import { SchemaKeyScanner, TERM_SCAN_MAX_FILES, withheldTermUsages, type TermScanFile, type TermScanResult } from "../../services/docs/termScan.js";
 import type { CitationRow } from "../../repositories/annotationsStore.js";
 import { notFound } from "@mcp/core";
@@ -515,7 +516,7 @@ const schemaKeyScanner = new SchemaKeyScanner();
 export const TERM_USAGES_COLD_WAIT_MS = 500;
 
 /** Zod shape keys across the repo's non-test TS/JS files, read from disk (R4), off the event loop (MCP-ISSUE-131). */
-function scanSchemaKeys(store: GraphStore, repoId: string, repoPath: string): Promise<TermScanResult> {
+function scanSchemaKeys(store: GraphStore, repoId: string, repoPath: string, stateDir: string): Promise<TermScanResult> {
   const files: TermScanFile[] = [];
   for (const raw of store.listIndexedFilePaths(repoId, ["typescript", "javascript"])) {
     const relative = raw.replace(/\\/g, "/");
@@ -526,7 +527,7 @@ function scanSchemaKeys(store: GraphStore, repoId: string, repoPath: string): Pr
       continue;
     }
   }
-  return schemaKeyScanner.scan(`${repoId}\u0000${repoPath}`, files);
+  return schemaKeyScanner.scan(`${repoId}\u0000${repoPath}`, files, { dir: stateDir, repoId, repoPath });
 }
 
 /**
@@ -579,7 +580,7 @@ async function readTerm(ctx: HandlerContext, repoId: string, term: string | unde
   } catch {
     throw notFound(`registryDoc '${registryDoc}' (from ${CITATIONS_CONFIG_PATH}) is not readable in repo '${repoId}'.`, { repoId, filePath: registryDoc });
   }
-  const scan = await scanSchemaKeys(store, repoId, repo.repoPath);
+  const scan = await scanSchemaKeys(store, repoId, repo.repoPath, freshnessStateDir(ctx.constants.dbPath));
   const scanMeta = { schemaFilesScanned: scan.filesScanned, ...(scan.capped && { schemaScanCapped: TERM_SCAN_MAX_FILES }) };
 
   if (!term) {
