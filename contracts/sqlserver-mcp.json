@@ -250,7 +250,7 @@
         "openWorldHint": false,
         "readOnlyHint": true
       },
-      "description": "Report readiness for sqlserver-mcp: connectivity, non-secret configuration, and version.",
+      "description": "Is the sqlserver-mcp server up and configured? Returns its status (ok or degraded), version and a non-secret config echo, with a connectivity probe when the server has one.",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {

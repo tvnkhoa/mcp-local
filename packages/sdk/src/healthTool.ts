@@ -56,7 +56,7 @@ export function createHealthCheckTool(
   return defineTool({
     name: "health_check",
     title: "Health check",
-    description: `Report readiness for ${options.serverName}: connectivity, non-secret configuration, and version.`,
+    description: `Is the ${options.serverName} server up and configured? Returns its status (ok or degraded), version and a non-secret config echo, with a connectivity probe when the server has one.`,
     input: inputZod,
     inputSchema: schema.object({ profile: schema.profile() }),
     annotations: annotations.read(),
