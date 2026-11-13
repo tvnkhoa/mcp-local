@@ -108,6 +108,11 @@ recommended tools, their arguments and the caveats that apply, from a static key
 grep-by-pattern, file structure, trace/call-flow, dead code, circular deps, docs search, stack traces,
 cross-repo, tests, risk triage, freshness and the Postgres check.
 
+**Pick a tool by `orient`, or by a name you know, then load it with `ToolSearch select:<names>` —
+never a keyword `ToolSearch`.** Measured 13 Nov (MCP-ISSUE-129): keyword ToolSearch routed 13/26
+codebase-index questions to the right tool (other servers' tools win on their names, e.g. Microsoft_365
+`complete_authentication` for "callers of a function"); `orient` routed 26/26.
+
 Four choices `orient` cannot make for you, because they are policy rather than routing:
 
 | Situation | Rule |
