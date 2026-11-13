@@ -126,7 +126,8 @@ export function buildExecTools(deps: SqlserverDeps): AnyToolDefinition[] {
     name: "execute_routine",
     title: "Execute routine",
     description:
-      "Execute a stored procedure with bound parameters and return its recordsets, output " +
+      "Execute a SQL Server stored procedure with bound parameters and return its recordsets, " +
+      "output " +
       "parameters and return value. DISABLED unless SQLSERVER_EXEC_ENABLED=true. Treated as " +
       "destructive for every routine: SQL Server records nothing about whether a procedure writes, " +
       "so the name is not evidence. Read get_routine_definition first.",

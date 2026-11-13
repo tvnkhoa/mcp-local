@@ -9,7 +9,7 @@
         "openWorldHint": true,
         "readOnlyHint": true
       },
-      "description": "Diff schema (and optionally row counts) between two environments — schema-drift / deploy check.",
+      "description": "Did the deploy land: diff the Postgres schema between two environments (schema drift), optionally with row counts. Row-level data: data_diff; one environment's migrations: migration_status / ddl_status.",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
@@ -47,7 +47,7 @@
         "openWorldHint": true,
         "readOnlyHint": true
       },
-      "description": "Compare a table's data between two environments via row count + order-independent checksum (deploy/seed verification).",
+      "description": "Is a Postgres table's data the same in two environments (staging vs prod, after a seed or deploy): row count plus an order-independent checksum. Schema differences: compare_environments.",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
@@ -96,7 +96,7 @@
         "openWorldHint": true,
         "readOnlyHint": false
       },
-      "description": "Apply a ddl_preview's plan. Re-plans under a database advisory lock and refuses (DDL_DRIFT) if the schema, the ledger or the files changed since the preview. One transaction per migration, stopping at the first failure. High risks from the preview must be listed in acknowledgeRisks — only after a human has agreed to them.",
+      "description": "Apply a ddl_preview's raw-SQL DDL plan to Postgres. Re-plans under a database advisory lock and refuses (DDL_DRIFT) if the schema, the ledger or the files changed since the preview. One transaction per migration, stopping at the first failure. High risks from the preview must be listed in acknowledgeRisks — only after a human has agreed to them.",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
@@ -138,7 +138,7 @@
         "openWorldHint": false,
         "readOnlyHint": false
       },
-      "description": "Write a new DDL migration file pair (V<timestamp>__<name>.up.sql / .down.sql) to POSTGRES_DDL_MIGRATIONS_DIR after validating it. Does NOT touch any database; never overwrites a file. Risks are reported for review, then enforced by ddl_preview. Not available with POSTGRES_DDL_EXTERNAL_LEDGER, whose files are the repo's own.",
+      "description": "Create an index, table or other Postgres schema change as a raw-SQL migration: validates it and writes the V<timestamp>__<name>.up.sql / .down.sql pair to POSTGRES_DDL_MIGRATIONS_DIR. Does NOT touch any database; never overwrites a file. Risks are reported for review, then enforced by ddl_preview. Not available with POSTGRES_DDL_EXTERNAL_LEDGER, whose files are the repo's own. EF Core instead: migration_add.",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
@@ -187,7 +187,7 @@
         "openWorldHint": true,
         "readOnlyHint": true
       },
-      "description": "Run a ddl_preview's plan inside one transaction and roll it back, to catch failures before ddl_apply. Takes real locks while it runs (bounded by lock_timeout). Non-transactional migrations (CONCURRENTLY) are skipped and reported as skipped.",
+      "description": "Test a ddl_preview's raw-SQL DDL plan: runs it inside one transaction and rolls it back, to catch failures before ddl_apply. Takes real locks while it runs (bounded by lock_timeout). Non-transactional migrations (CONCURRENTLY) are skipped and reported as skipped.",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
@@ -218,7 +218,7 @@
         "openWorldHint": true,
         "readOnlyHint": true
       },
-      "description": "Plan DDL migrations against an environment and return an approval token. File mode applies pending files (direction \"up\", optional target) or reverts applied ones newest-first via their .down.sql (direction \"down\", target required; \"0\" = all). Inline mode takes sql instead. Reports per-migration risks and which ones ddl_apply must acknowledge. Executes nothing; refused on read-only environments (prod).",
+      "description": "Plan raw-SQL DDL migrations against a Postgres environment and return an approval token for ddl_apply. File mode applies pending files (direction \"up\", optional target) or reverts applied ones newest-first via their .down.sql (direction \"down\", target required; \"0\" = all). Inline mode takes sql instead. Reports per-migration risks and which ones ddl_apply must acknowledge. Executes nothing; refused on read-only environments (prod).",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
@@ -274,7 +274,7 @@
         "openWorldHint": true,
         "readOnlyHint": true
       },
-      "description": "Show raw-SQL DDL migrations for an environment: applied, pending, edited-since-applied (checksum mismatch), missing from disk, and out-of-order, read from the configured ledger (mcp_ops.ddl_history, or the repo's own table with POSTGRES_DDL_EXTERNAL_LEDGER). Read-only; works on prod. Requires POSTGRES_DDL_ENABLED.",
+      "description": "Which raw-SQL DDL migrations are applied, pending, edited since applied (checksum mismatch), missing from disk or out of order in a Postgres environment, read from the configured ledger (mcp_ops.ddl_history, or the repo's own table with POSTGRES_DDL_EXTERNAL_LEDGER). Read-only; works on prod. Requires POSTGRES_DDL_ENABLED. EF Core migrations: migration_status.",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
@@ -302,7 +302,7 @@
         "openWorldHint": true,
         "readOnlyHint": true
       },
-      "description": "Describe columns for a table.",
+      "description": "What columns does a Postgres table have: name, data type, nullability, max length and default, in column order. Foreign keys: get_table_relationships; null/distinct stats: profile_table.",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
@@ -340,7 +340,7 @@
         "openWorldHint": true,
         "readOnlyHint": true
       },
-      "description": "List foreign-key relationships (optionally for one table) — useful for JOINs and write/migration impact.",
+      "description": "Foreign keys between Postgres tables — all of them, or those pointing from or to one table: which columns to JOIN on, and what a write or migration reaches. Columns: describe_table.",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
@@ -371,7 +371,7 @@
         "openWorldHint": true,
         "readOnlyHint": true
       },
-      "description": "Check MCP server and PostgreSQL connectivity for an environment.",
+      "description": "Is the Postgres database reachable: checks this server and PostgreSQL connectivity for one environment. SQL Server: sqlserver-mcp health_check.",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
@@ -400,7 +400,7 @@
         "openWorldHint": false,
         "readOnlyHint": true
       },
-      "description": "List configured database environments, their write capability, and masked connection info.",
+      "description": "Which Postgres environments are configured (dev, staging, prod…): each one's write capability and masked connection info. Pass a name as environment to the other tools.",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
@@ -425,7 +425,7 @@
         "openWorldHint": true,
         "readOnlyHint": true
       },
-      "description": "List tables in a schema (default: public).",
+      "description": "List the tables in a Postgres schema (default: public), names only. Columns: describe_table; row counts and column stats: profile_table.",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
@@ -456,7 +456,7 @@
         "openWorldHint": false,
         "readOnlyHint": false
       },
-      "description": "Generate a new EF Core migration (dotnet ef migrations add). Does NOT touch the database; returns generated file paths to edit.",
+      "description": "Add a new EF Core migration (dotnet ef migrations add) and return the generated paths to edit. Does NOT touch the database; apply it with migration_preview → migration_apply. Raw SQL instead: ddl_create.",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
@@ -491,7 +491,7 @@
         "openWorldHint": true,
         "readOnlyHint": false
       },
-      "description": "Apply a migration_preview's plan: pending migrations (dotnet ef database update), or a rollback to its targetMigration (dotnet ef database update <target>). Drift-guarded + verifies post-schema.",
+      "description": "Apply EF Core migrations planned by migration_preview: the planned ones (dotnet ef database update), or the rollback to its targetMigration (dotnet ef database update <target>). Drift-guarded; verifies the schema afterwards.",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
@@ -536,7 +536,7 @@
         "openWorldHint": true,
         "readOnlyHint": true
       },
-      "description": "Run the pending migration SQL that migration_preview shows, one statement at a time inside a rolled-back transaction, to catch SQL errors before applying. Reports the failing statement; skips (and lists) statements that cannot run in a transaction, such as CREATE INDEX CONCURRENTLY.",
+      "description": "Test pending EF Core migration SQL before applying it: runs what migration_preview shows one statement at a time inside a rolled-back transaction. Reports the failing statement; skips (and lists) statements that cannot run in a transaction, such as CREATE INDEX CONCURRENTLY.",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
@@ -564,7 +564,7 @@
         "openWorldHint": true,
         "readOnlyHint": true
       },
-      "description": "Snapshot current schema + return the pending migration SQL delta and an approval token. Full idempotent script available at profile:verbose. With targetMigration, plans a ROLLBACK instead: reverts every migration applied after it (\"0\" = all) via their Down methods; migration_apply then requires acknowledgeRisks including EF_REVERT.",
+      "description": "Plan applying pending EF Core migrations to a Postgres environment: snapshots the current schema and returns the pending migration SQL delta plus an approval token for migration_apply. Full idempotent script available at profile:verbose. With targetMigration, plans a ROLLBACK instead: reverts every migration applied after it (\"0\" = all) via their Down methods; migration_apply then requires acknowledgeRisks including EF_REVERT.",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
@@ -596,7 +596,7 @@
         "openWorldHint": true,
         "readOnlyHint": true
       },
-      "description": "Show applied vs pending EF Core migrations for an environment. Requires POSTGRES_MIGRATION_ENABLED.",
+      "description": "Which EF Core migrations are applied and which are pending in a Postgres environment. Requires POSTGRES_MIGRATION_ENABLED. Raw-SQL DDL migrations: ddl_status.",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
@@ -624,7 +624,7 @@
         "openWorldHint": true,
         "readOnlyHint": true
       },
-      "description": "Quick table profile: estimated row count, per-column stats (distinct/null), and a small sample.",
+      "description": "Profile a Postgres table's data: estimated row count, per-column distinct and null stats, and a few sample rows. Same table across two environments: data_diff.",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
@@ -667,7 +667,7 @@
         "openWorldHint": true,
         "readOnlyHint": true
       },
-      "description": "Run a read-only SQL query with guardrails.",
+      "description": "Query a Postgres database: run one read-only SELECT (or WITH … SELECT) with bound params in a read-only transaction, capped by a row limit and a statement timeout; explain:true returns the plan and estimated cost instead. Changing rows: write_preview. MSSQL: sqlserver-mcp.",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
@@ -737,7 +737,7 @@
         "openWorldHint": true,
         "readOnlyHint": false
       },
-      "description": "Apply a previously previewed write using its previewId + approvalToken. Commits the change and returns a rollbackId, or null when the preview reported the statement cannot be rolled back.",
+      "description": "Commit a Postgres write previewed by write_preview, using its previewId + approvalToken. Returns a rollbackId for write_rollback, or null when the preview reported the statement cannot be rolled back.",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
@@ -775,7 +775,7 @@
         "openWorldHint": true,
         "readOnlyHint": true
       },
-      "description": "Preview an INSERT/UPDATE/DELETE (dry-run, rolled back) and get an approval token. Requires POSTGRES_WRITE_ENABLED. UPDATE/DELETE must have WHERE unless allowFullTable. Check rollbackSupported/rollbackNote: not every statement can be rolled back.",
+      "description": "Insert, update or delete Postgres rows, step 1: dry-runs one INSERT/UPDATE/DELETE in a rolled-back transaction and returns a previewId + approvalToken for write_apply. Requires POSTGRES_WRITE_ENABLED; prod is always read-only. UPDATE/DELETE must have WHERE unless allowFullTable. Check rollbackSupported/rollbackNote: not every statement can be rolled back.",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
@@ -832,7 +832,7 @@
         "openWorldHint": true,
         "readOnlyHint": false
       },
-      "description": "Roll back a previously applied write using its rollbackId. Restores each captured row independently; a row changed since the apply is reported, not overwritten. A partial rollback is retryable.",
+      "description": "Undo a Postgres write committed by write_apply, using its rollbackId. Restores each captured row independently; a row changed since the apply is reported, not overwritten. A partial rollback is retryable.",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {

@@ -42,7 +42,7 @@ export function buildReadTools(deps: PostgresDeps): AnyToolDefinition[] {
 
   const healthCheck = defineTool({
     name: "health_check",
-    description: "Check MCP server and PostgreSQL connectivity for an environment.",
+    description: "Is the Postgres database reachable: checks this server and PostgreSQL connectivity for one environment. SQL Server: sqlserver-mcp health_check.",
     input: z.object({ environment: environmentArg, profile: profileArg }).strict(),
     inputSchema: schema.object({
       environment: schema.string("Target environment (default: configured default)."),
@@ -66,7 +66,7 @@ export function buildReadTools(deps: PostgresDeps): AnyToolDefinition[] {
   const listEnvironments = defineTool({
     name: "list_environments",
     description:
-      "List configured database environments, their write capability, and masked connection info.",
+      "Which Postgres environments are configured (dev, staging, prod…): each one's write capability and masked connection info. Pass a name as environment to the other tools.",
     input: z.object({ profile: profileArg }).strict(),
     inputSchema: schema.object({ profile: profileProp }),
     annotations: readsConfig,
@@ -79,7 +79,7 @@ export function buildReadTools(deps: PostgresDeps): AnyToolDefinition[] {
 
   const listTables = defineTool({
     name: "list_tables",
-    description: "List tables in a schema (default: public).",
+    description: "List the tables in a Postgres schema (default: public), names only. Columns: describe_table; row counts and column stats: profile_table.",
     input: z
       .object({
         schema: z.string().min(1).max(128).optional(),
@@ -116,7 +116,7 @@ export function buildReadTools(deps: PostgresDeps): AnyToolDefinition[] {
 
   const describeTable = defineTool({
     name: "describe_table",
-    description: "Describe columns for a table.",
+    description: "What columns does a Postgres table have: name, data type, nullability, max length and default, in column order. Foreign keys: get_table_relationships; null/distinct stats: profile_table.",
     input: z
       .object({
         schema: z.string().min(1).max(128).default("public"),
@@ -273,7 +273,7 @@ export function buildReadTools(deps: PostgresDeps): AnyToolDefinition[] {
 
   const runReadQuery = defineTool({
     name: "run_read_query",
-    description: "Run a read-only SQL query with guardrails.",
+    description: "Query a Postgres database: run one read-only SELECT (or WITH … SELECT) with bound params in a read-only transaction, capped by a row limit and a statement timeout; explain:true returns the plan and estimated cost instead. Changing rows: write_preview. MSSQL: sqlserver-mcp.",
     input: runReadQuerySchema,
     inputSchema: schema.object(
       {
@@ -298,7 +298,7 @@ export function buildReadTools(deps: PostgresDeps): AnyToolDefinition[] {
   const getTableRelationships = defineTool({
     name: "get_table_relationships",
     description:
-      "List foreign-key relationships (optionally for one table) — useful for JOINs and write/migration impact.",
+      "Foreign keys between Postgres tables — all of them, or those pointing from or to one table: which columns to JOIN on, and what a write or migration reaches. Columns: describe_table.",
     input: z
       .object({
         table: z.string().min(1).max(128).optional(),
@@ -315,7 +315,7 @@ export function buildReadTools(deps: PostgresDeps): AnyToolDefinition[] {
   const profileTable = defineTool({
     name: "profile_table",
     description:
-      "Quick table profile: estimated row count, per-column stats (distinct/null), and a small sample.",
+      "Profile a Postgres table's data: estimated row count, per-column distinct and null stats, and a few sample rows. Same table across two environments: data_diff.",
     input: z
       .object({
         schema: z.string().min(1).max(128).optional(),
@@ -343,7 +343,7 @@ export function buildReadTools(deps: PostgresDeps): AnyToolDefinition[] {
   const dataDiff = defineTool({
     name: "data_diff",
     description:
-      "Compare a table's data between two environments via row count + order-independent checksum (deploy/seed verification).",
+      "Is a Postgres table's data the same in two environments (staging vs prod, after a seed or deploy): row count plus an order-independent checksum. Schema differences: compare_environments.",
     input: z
       .object({
         source: z.string().min(1).max(64),

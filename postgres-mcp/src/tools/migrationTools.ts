@@ -39,7 +39,7 @@ export function buildMigrationTools(deps: PostgresDeps): AnyToolDefinition[] {
   const migrationStatus = defineTool({
     name: "migration_status",
     description:
-      "Show applied vs pending EF Core migrations for an environment. Requires POSTGRES_MIGRATION_ENABLED.",
+      "Which EF Core migrations are applied and which are pending in a Postgres environment. Requires POSTGRES_MIGRATION_ENABLED. Raw-SQL DDL migrations: ddl_status.",
     input: z.object({ environment: environmentArg, profile: profileArg }).strict(),
     inputSchema: schema.object({ environment: envProp, profile: profileProp }),
     annotations: readsDb,
@@ -50,7 +50,7 @@ export function buildMigrationTools(deps: PostgresDeps): AnyToolDefinition[] {
   const migrationAdd = defineTool({
     name: "migration_add",
     description:
-      "Generate a new EF Core migration (dotnet ef migrations add). Does NOT touch the database; returns generated file paths to edit.",
+      "Add a new EF Core migration (dotnet ef migrations add) and return the generated paths to edit. Does NOT touch the database; apply it with migration_preview → migration_apply. Raw SQL instead: ddl_create.",
     input: z
       .object({
         name: z.string().min(1).max(128),
@@ -74,7 +74,7 @@ export function buildMigrationTools(deps: PostgresDeps): AnyToolDefinition[] {
   const migrationPreview = defineTool({
     name: "migration_preview",
     description:
-      "Snapshot current schema + return the pending migration SQL delta and an approval token. Full idempotent script available at profile:verbose. With targetMigration, plans a ROLLBACK instead: reverts every migration applied after it (\"0\" = all) via their Down methods; migration_apply then requires acknowledgeRisks including EF_REVERT.",
+      "Plan applying pending EF Core migrations to a Postgres environment: snapshots the current schema and returns the pending migration SQL delta plus an approval token for migration_apply. Full idempotent script available at profile:verbose. With targetMigration, plans a ROLLBACK instead: reverts every migration applied after it (\"0\" = all) via their Down methods; migration_apply then requires acknowledgeRisks including EF_REVERT.",
     input: z
       .object({
         environment: environmentArg,
@@ -95,7 +95,7 @@ export function buildMigrationTools(deps: PostgresDeps): AnyToolDefinition[] {
   const migrationApply = defineTool({
     name: "migration_apply",
     description:
-      "Apply a migration_preview's plan: pending migrations (dotnet ef database update), or a rollback to its targetMigration (dotnet ef database update <target>). Drift-guarded + verifies post-schema.",
+      "Apply EF Core migrations planned by migration_preview: the planned ones (dotnet ef database update), or the rollback to its targetMigration (dotnet ef database update <target>). Drift-guarded; verifies the schema afterwards.",
     input: z
       .object({
         previewId: z.string().min(1).max(128),
@@ -123,7 +123,7 @@ export function buildMigrationTools(deps: PostgresDeps): AnyToolDefinition[] {
   const migrationDryRun = defineTool({
     name: "migration_dry_run",
     description:
-      "Run the pending migration SQL that migration_preview shows, one statement at a time inside a rolled-back transaction, to catch SQL errors before applying. Reports the failing statement; skips (and lists) statements that cannot run in a transaction, such as CREATE INDEX CONCURRENTLY.",
+      "Test pending EF Core migration SQL before applying it: runs what migration_preview shows one statement at a time inside a rolled-back transaction. Reports the failing statement; skips (and lists) statements that cannot run in a transaction, such as CREATE INDEX CONCURRENTLY.",
     input: z.object({ environment: environmentArg, profile: profileArg }).strict(),
     inputSchema: schema.object({ environment: envProp, profile: profileProp }),
     annotations: previewsChange,
@@ -134,7 +134,7 @@ export function buildMigrationTools(deps: PostgresDeps): AnyToolDefinition[] {
   const compareEnvironments = defineTool({
     name: "compare_environments",
     description:
-      "Diff schema (and optionally row counts) between two environments — schema-drift / deploy check.",
+      "Did the deploy land: diff the Postgres schema between two environments (schema drift), optionally with row counts. Row-level data: data_diff; one environment's migrations: migration_status / ddl_status.",
     input: z
       .object({
         source: z.string().min(1).max(64),

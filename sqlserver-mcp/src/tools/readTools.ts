@@ -214,7 +214,7 @@ export function buildReadTools(deps: SqlserverDeps): AnyToolDefinition[] {
     name: "list_environments",
     title: "List environments",
     description:
-      "List configured SQL Server environments with masked connection details, which are allowed, " +
+      "Which SQL Server environments are configured: masked connection details, which are allowed, " +
       "and how many catalog pools are currently open for each.",
     annotations: readsConfig,
     inputSchema: schema.object({ profile: profileProp }),
@@ -231,9 +231,9 @@ export function buildReadTools(deps: SqlserverDeps): AnyToolDefinition[] {
     name: "list_databases",
     title: "List databases",
     description:
-      "List catalogs on the instance, with state, collation and whether the current login can " +
-      "actually open each one. Start here — catalog names are deployment-specific and must be " +
-      "discovered, not assumed.",
+      "List the databases (catalogs) on a SQL Server instance, with state, collation and whether " +
+      "the current login can actually open each one. Start here — catalog names are " +
+      "deployment-specific and must be discovered, not assumed.",
     annotations: readsDatabase,
     inputSchema: schema.object({
       environment: environmentProp,
@@ -275,8 +275,8 @@ export function buildReadTools(deps: SqlserverDeps): AnyToolDefinition[] {
     name: "list_tables",
     title: "List tables and views",
     description:
-      "Inventory of tables and views in one catalog, with approximate row counts taken from " +
-      "partition statistics rather than COUNT(*).",
+      "List the tables and views in a SQL Server catalog, with approximate row counts taken from " +
+      "partition statistics rather than COUNT(*). Columns and indexes: describe_table.",
     annotations: readsDatabase,
     inputSchema: schema.object({
       environment: environmentProp,
@@ -342,8 +342,8 @@ export function buildReadTools(deps: SqlserverDeps): AnyToolDefinition[] {
     name: "describe_table",
     title: "Describe table",
     description:
-      "Full shape of one table or view: columns with types and defaults, computed definitions, " +
-      "indexes, and foreign keys in both directions.",
+      "What columns and indexes does a SQL Server table or view have: columns with types and " +
+      "defaults, computed definitions, indexes, and foreign keys in both directions.",
     annotations: readsDatabase,
     inputSchema: schema.object(
       {
@@ -404,8 +404,9 @@ export function buildReadTools(deps: SqlserverDeps): AnyToolDefinition[] {
     name: "get_table_relationships",
     title: "Get table relationships",
     description:
-      "Foreign keys touching a table, in both directions — what it points at, and what points at " +
-      "it. The incoming half is what determines whether a row can be deleted.",
+      "What references a SQL Server table, and what it references: its foreign keys in both " +
+      "directions. The incoming half is what determines whether a row can be deleted. Objects " +
+      "reaching into other catalogs: find_cross_database_references.",
     annotations: readsDatabase,
     inputSchema: schema.object(
       {
@@ -446,8 +447,9 @@ export function buildReadTools(deps: SqlserverDeps): AnyToolDefinition[] {
     name: "list_routines",
     title: "List routines",
     description:
-      "Inventory of stored procedures, functions, views and triggers in one catalog. On a schema " +
-      "where most read logic lives in procedures rather than in tables, this is the map.",
+      "Which stored procedures, functions, views and triggers exist in a SQL Server catalog. On a " +
+      "schema where most read logic lives in procedures rather than in tables, this is the map. " +
+      "Definition: get_routine_definition.",
     annotations: readsDatabase,
     inputSchema: schema.object({
       environment: environmentProp,
@@ -516,8 +518,9 @@ export function buildReadTools(deps: SqlserverDeps): AnyToolDefinition[] {
     name: "get_routine_definition",
     title: "Get routine definition",
     description:
-      "Full text of a stored procedure, function, view or trigger, plus its parameter contract " +
-      "(name, type, output, has-default). Read this before calling execute_routine.",
+      "What does a SQL Server stored procedure (or function, view, trigger) do: its full T-SQL text " +
+      "plus its parameter contract (name, type, output, has-default). Read this before calling " +
+      "execute_routine.",
     annotations: readsDatabase,
     inputSchema: schema.object(
       {
@@ -575,9 +578,10 @@ export function buildReadTools(deps: SqlserverDeps): AnyToolDefinition[] {
     name: "find_cross_database_references",
     title: "Find cross-database references",
     description:
-      "Which objects in this catalog reference objects in another catalog on the same instance, " +
-      "grouped by the catalog they reach into. This is the dependency graph between databases — " +
-      "SQL Server's three-part names are the only cross-catalog mechanism short of a linked server.",
+      "Cross-database references on SQL Server: which objects in this catalog reference objects in " +
+      "another catalog on the same instance, grouped by the catalog they reach into. Three-part " +
+      "names are the only cross-catalog mechanism short of a linked server. Foreign keys within a " +
+      "catalog: get_table_relationships.",
     annotations: readsDatabase,
     inputSchema: schema.object({
       environment: environmentProp,

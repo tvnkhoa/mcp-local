@@ -25,7 +25,7 @@ export function buildDdlTools(deps: PostgresDeps): AnyToolDefinition[] {
   const ddlStatus = defineTool({
     name: "ddl_status",
     description:
-      "Show raw-SQL DDL migrations for an environment: applied, pending, edited-since-applied (checksum mismatch), missing from disk, and out-of-order, read from the configured ledger (mcp_ops.ddl_history, or the repo's own table with POSTGRES_DDL_EXTERNAL_LEDGER). Read-only; works on prod. Requires POSTGRES_DDL_ENABLED.",
+      "Which raw-SQL DDL migrations are applied, pending, edited since applied (checksum mismatch), missing from disk or out of order in a Postgres environment, read from the configured ledger (mcp_ops.ddl_history, or the repo's own table with POSTGRES_DDL_EXTERNAL_LEDGER). Read-only; works on prod. Requires POSTGRES_DDL_ENABLED. EF Core migrations: migration_status.",
     input: z.object({ environment: environmentArg, profile: profileArg }).strict(),
     inputSchema: schema.object({ environment: envProp, profile: profileProp }),
     annotations: readsDb,
@@ -36,7 +36,7 @@ export function buildDdlTools(deps: PostgresDeps): AnyToolDefinition[] {
   const ddlCreate = defineTool({
     name: "ddl_create",
     description:
-      "Write a new DDL migration file pair (V<timestamp>__<name>.up.sql / .down.sql) to POSTGRES_DDL_MIGRATIONS_DIR after validating it. Does NOT touch any database; never overwrites a file. Risks are reported for review, then enforced by ddl_preview. Not available with POSTGRES_DDL_EXTERNAL_LEDGER, whose files are the repo's own.",
+      "Create an index, table or other Postgres schema change as a raw-SQL migration: validates it and writes the V<timestamp>__<name>.up.sql / .down.sql pair to POSTGRES_DDL_MIGRATIONS_DIR. Does NOT touch any database; never overwrites a file. Risks are reported for review, then enforced by ddl_preview. Not available with POSTGRES_DDL_EXTERNAL_LEDGER, whose files are the repo's own. EF Core instead: migration_add.",
     input: z
       .object({
         name: z.string().regex(MIGRATION_NAME),
@@ -66,7 +66,7 @@ export function buildDdlTools(deps: PostgresDeps): AnyToolDefinition[] {
   const ddlPreview = defineTool({
     name: "ddl_preview",
     description:
-      "Plan DDL migrations against an environment and return an approval token. File mode applies pending files (direction \"up\", optional target) or reverts applied ones newest-first via their .down.sql (direction \"down\", target required; \"0\" = all). Inline mode takes sql instead. Reports per-migration risks and which ones ddl_apply must acknowledge. Executes nothing; refused on read-only environments (prod).",
+      "Plan raw-SQL DDL migrations against a Postgres environment and return an approval token for ddl_apply. File mode applies pending files (direction \"up\", optional target) or reverts applied ones newest-first via their .down.sql (direction \"down\", target required; \"0\" = all). Inline mode takes sql instead. Reports per-migration risks and which ones ddl_apply must acknowledge. Executes nothing; refused on read-only environments (prod).",
     input: z
       .object({
         environment: environmentArg,
@@ -97,7 +97,7 @@ export function buildDdlTools(deps: PostgresDeps): AnyToolDefinition[] {
   const ddlDryRun = defineTool({
     name: "ddl_dry_run",
     description:
-      "Run a ddl_preview's plan inside one transaction and roll it back, to catch failures before ddl_apply. Takes real locks while it runs (bounded by lock_timeout). Non-transactional migrations (CONCURRENTLY) are skipped and reported as skipped.",
+      "Test a ddl_preview's raw-SQL DDL plan: runs it inside one transaction and rolls it back, to catch failures before ddl_apply. Takes real locks while it runs (bounded by lock_timeout). Non-transactional migrations (CONCURRENTLY) are skipped and reported as skipped.",
     input: z.object({ previewId: z.string().min(1).max(128), profile: profileArg }).strict(),
     inputSchema: schema.object({ previewId: schema.string(), profile: profileProp }, { required: ["previewId"] }),
     annotations: previewsChange,
@@ -108,7 +108,7 @@ export function buildDdlTools(deps: PostgresDeps): AnyToolDefinition[] {
   const ddlApply = defineTool({
     name: "ddl_apply",
     description:
-      "Apply a ddl_preview's plan. Re-plans under a database advisory lock and refuses (DDL_DRIFT) if the schema, the ledger or the files changed since the preview. One transaction per migration, stopping at the first failure. High risks from the preview must be listed in acknowledgeRisks — only after a human has agreed to them.",
+      "Apply a ddl_preview's raw-SQL DDL plan to Postgres. Re-plans under a database advisory lock and refuses (DDL_DRIFT) if the schema, the ledger or the files changed since the preview. One transaction per migration, stopping at the first failure. High risks from the preview must be listed in acknowledgeRisks — only after a human has agreed to them.",
     input: z
       .object({
         previewId: z.string().min(1).max(128),

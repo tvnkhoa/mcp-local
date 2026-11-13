@@ -132,7 +132,8 @@ export function buildWriteTools(deps: SqlserverDeps): AnyToolDefinition[] {
     name: "write_preview",
     title: "Preview write batch",
     description:
-      "Run a T-SQL write batch (DECLARE, INSERT/UPDATE/DELETE/MERGE, IF, TRY/CATCH, THROW, its own " +
+      "Insert, update or delete SQL Server rows, step 1: runs a T-SQL write batch (DECLARE, " +
+      "INSERT/UPDATE/DELETE/MERGE, IF, TRY/CATCH, THROW, its own " +
       "BEGIN TRAN/COMMIT) inside a transaction that is always rolled back, and return rowsAffected " +
       "per statement, any SELECT recordsets (end the batch with a verify SELECT to see the would-be " +
       "state), and a previewId + approvalToken for write_apply. DISABLED unless " +
@@ -239,7 +240,8 @@ export function buildWriteTools(deps: SqlserverDeps): AnyToolDefinition[] {
     name: "write_apply",
     title: "Apply write batch",
     description:
-      "Commit a batch previewed by write_preview, using its previewId + approvalToken. Re-runs the " +
+      "Commit a SQL Server write batch previewed by write_preview, using its previewId + " +
+      "approvalToken. Re-runs the " +
       "exact previewed batch against the previewed environment and catalog, re-checks every gate, " +
       "and rolls back instead of committing if rowsAffected differs from the preview. Single-use; " +
       "no rollback tool exists, so read the preview first.",

@@ -63,10 +63,10 @@ export function buildQueryTools(deps: SqlserverDeps): AnyToolDefinition[] {
     name: "run_read_query",
     title: "Run read query",
     description:
-      "Run one read-only T-SQL statement (SELECT, or WITH … SELECT). Three-part names " +
-      "(Database.dbo.Table) are allowed and are the way to join across catalogs; four-part names " +
-      "are refused. Pass `databases` to run the same statement across several catalogs and get " +
-      "results labelled per catalog.",
+      "Run a read-only T-SQL query on SQL Server: one statement (SELECT, or WITH … SELECT). " +
+      "Three-part names (Database.dbo.Table) are allowed and are the way to join across catalogs; " +
+      "four-part names are refused. Pass `databases` to run the same statement across several " +
+      "catalogs (e.g. one per tenant) and get results labelled per catalog.",
     annotations: readsDatabase,
     inputSchema: schema.object(
       {
@@ -180,7 +180,8 @@ export function buildQueryTools(deps: SqlserverDeps): AnyToolDefinition[] {
     name: "profile_table",
     title: "Profile table",
     description:
-      "Per-column null ratio and distinct count for a table, plus its exact row count. Reads the " +
+      "Profile a SQL Server table's data: per-column null ratio and distinct count, plus its exact " +
+      "row count. Reads the " +
       "table, so it is bounded by the same timeout as a query. distinctCount is null for types SQL " +
       "Server cannot compare (xml, text, image, geography, …).",
     annotations: readsDatabase,

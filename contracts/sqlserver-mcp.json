@@ -9,7 +9,7 @@
         "openWorldHint": true,
         "readOnlyHint": true
       },
-      "description": "Full shape of one table or view: columns with types and defaults, computed definitions, indexes, and foreign keys in both directions.",
+      "description": "What columns and indexes does a SQL Server table or view have: columns with types and defaults, computed definitions, indexes, and foreign keys in both directions.",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
@@ -55,7 +55,7 @@
         "openWorldHint": true,
         "readOnlyHint": false
       },
-      "description": "Execute a stored procedure with bound parameters and return its recordsets, output parameters and return value. DISABLED unless SQLSERVER_EXEC_ENABLED=true. Treated as destructive for every routine: SQL Server records nothing about whether a procedure writes, so the name is not evidence. Read get_routine_definition first.",
+      "description": "Execute a SQL Server stored procedure with bound parameters and return its recordsets, output parameters and return value. DISABLED unless SQLSERVER_EXEC_ENABLED=true. Treated as destructive for every routine: SQL Server records nothing about whether a procedure writes, so the name is not evidence. Read get_routine_definition first.",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
@@ -115,7 +115,7 @@
         "openWorldHint": true,
         "readOnlyHint": true
       },
-      "description": "Which objects in this catalog reference objects in another catalog on the same instance, grouped by the catalog they reach into. This is the dependency graph between databases — SQL Server's three-part names are the only cross-catalog mechanism short of a linked server.",
+      "description": "Cross-database references on SQL Server: which objects in this catalog reference objects in another catalog on the same instance, grouped by the catalog they reach into. Three-part names are the only cross-catalog mechanism short of a linked server. Foreign keys within a catalog: get_table_relationships.",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
@@ -154,7 +154,7 @@
         "openWorldHint": true,
         "readOnlyHint": true
       },
-      "description": "Full text of a stored procedure, function, view or trigger, plus its parameter contract (name, type, output, has-default). Read this before calling execute_routine.",
+      "description": "What does a SQL Server stored procedure (or function, view, trigger) do: its full T-SQL text plus its parameter contract (name, type, output, has-default). Read this before calling execute_routine.",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
@@ -204,7 +204,7 @@
         "openWorldHint": true,
         "readOnlyHint": true
       },
-      "description": "Foreign keys touching a table, in both directions — what it points at, and what points at it. The incoming half is what determines whether a row can be deleted.",
+      "description": "What references a SQL Server table, and what it references: its foreign keys in both directions. The incoming half is what determines whether a row can be deleted. Objects reaching into other catalogs: find_cross_database_references.",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
@@ -277,7 +277,7 @@
         "openWorldHint": true,
         "readOnlyHint": true
       },
-      "description": "List catalogs on the instance, with state, collation and whether the current login can actually open each one. Start here — catalog names are deployment-specific and must be discovered, not assumed.",
+      "description": "List the databases (catalogs) on a SQL Server instance, with state, collation and whether the current login can actually open each one. Start here — catalog names are deployment-specific and must be discovered, not assumed.",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
@@ -312,7 +312,7 @@
         "openWorldHint": false,
         "readOnlyHint": true
       },
-      "description": "List configured SQL Server environments with masked connection details, which are allowed, and how many catalog pools are currently open for each.",
+      "description": "Which SQL Server environments are configured: masked connection details, which are allowed, and how many catalog pools are currently open for each.",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
@@ -339,7 +339,7 @@
         "openWorldHint": true,
         "readOnlyHint": true
       },
-      "description": "Inventory of stored procedures, functions, views and triggers in one catalog. On a schema where most read logic lives in procedures rather than in tables, this is the map.",
+      "description": "Which stored procedures, functions, views and triggers exist in a SQL Server catalog. On a schema where most read logic lives in procedures rather than in tables, this is the map. Definition: get_routine_definition.",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
@@ -405,7 +405,7 @@
         "openWorldHint": true,
         "readOnlyHint": true
       },
-      "description": "Inventory of tables and views in one catalog, with approximate row counts taken from partition statistics rather than COUNT(*).",
+      "description": "List the tables and views in a SQL Server catalog, with approximate row counts taken from partition statistics rather than COUNT(*). Columns and indexes: describe_table.",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
@@ -459,7 +459,7 @@
         "openWorldHint": true,
         "readOnlyHint": true
       },
-      "description": "Per-column null ratio and distinct count for a table, plus its exact row count. Reads the table, so it is bounded by the same timeout as a query. distinctCount is null for types SQL Server cannot compare (xml, text, image, geography, …).",
+      "description": "Profile a SQL Server table's data: per-column null ratio and distinct count, plus its exact row count. Reads the table, so it is bounded by the same timeout as a query. distinctCount is null for types SQL Server cannot compare (xml, text, image, geography, …).",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
@@ -516,7 +516,7 @@
         "openWorldHint": true,
         "readOnlyHint": true
       },
-      "description": "Run one read-only T-SQL statement (SELECT, or WITH … SELECT). Three-part names (Database.dbo.Table) are allowed and are the way to join across catalogs; four-part names are refused. Pass `databases` to run the same statement across several catalogs and get results labelled per catalog.",
+      "description": "Run a read-only T-SQL query on SQL Server: one statement (SELECT, or WITH … SELECT). Three-part names (Database.dbo.Table) are allowed and are the way to join across catalogs; four-part names are refused. Pass `databases` to run the same statement across several catalogs (e.g. one per tenant) and get results labelled per catalog.",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
@@ -593,7 +593,7 @@
         "openWorldHint": true,
         "readOnlyHint": false
       },
-      "description": "Commit a batch previewed by write_preview, using its previewId + approvalToken. Re-runs the exact previewed batch against the previewed environment and catalog, re-checks every gate, and rolls back instead of committing if rowsAffected differs from the preview. Single-use; no rollback tool exists, so read the preview first.",
+      "description": "Commit a SQL Server write batch previewed by write_preview, using its previewId + approvalToken. Re-runs the exact previewed batch against the previewed environment and catalog, re-checks every gate, and rolls back instead of committing if rowsAffected differs from the preview. Single-use; no rollback tool exists, so read the preview first.",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
@@ -632,7 +632,7 @@
         "openWorldHint": true,
         "readOnlyHint": false
       },
-      "description": "Run a T-SQL write batch (DECLARE, INSERT/UPDATE/DELETE/MERGE, IF, TRY/CATCH, THROW, its own BEGIN TRAN/COMMIT) inside a transaction that is always rolled back, and return rowsAffected per statement, any SELECT recordsets (end the batch with a verify SELECT to see the would-be state), and a previewId + approvalToken for write_apply. DISABLED unless SQLSERVER_WRITE_ENABLED=true; only environments in SQLSERVER_WRITABLE_ENVIRONMENTS, never prod or uat. Refuses DDL, EXEC, USE, GO, cross-catalog names, and ROLLBACK except `ROLLBACK; THROW;` closing a CATCH block.",
+      "description": "Insert, update or delete SQL Server rows, step 1: runs a T-SQL write batch (DECLARE, INSERT/UPDATE/DELETE/MERGE, IF, TRY/CATCH, THROW, its own BEGIN TRAN/COMMIT) inside a transaction that is always rolled back, and return rowsAffected per statement, any SELECT recordsets (end the batch with a verify SELECT to see the would-be state), and a previewId + approvalToken for write_apply. DISABLED unless SQLSERVER_WRITE_ENABLED=true; only environments in SQLSERVER_WRITABLE_ENVIRONMENTS, never prod or uat. Refuses DDL, EXEC, USE, GO, cross-catalog names, and ROLLBACK except `ROLLBACK; THROW;` closing a CATCH block.",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
