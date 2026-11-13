@@ -36,7 +36,7 @@ export function buildSearchTools(deps: CodebaseIndexDeps): AnyToolDefinition[] {
 
   const searchSymbols = defineTool({
     name: "search_symbols",
-    description: "Find where a symbol (class, function, method, property…) is defined, by name, across all repos or one repo. strategy=name is strict name/signature matching; strategy=intent uses broader tokenized matching (multi-word queries work, e.g. 'send notification email'). ranked=true returns scored candidates (qualifiedName 'EnclosingType.Member' for class members; enclosing-type names join intent matching; test files rank lower) and honors strategy plus the kind/language/filePath filters. A business phrase with no identifier → search_regex first; the code itself → get_symbol_source. excludeTests=true drops test-path results entirely.",
+    description: "Find where a symbol (class, function, method, property…) is defined, by name, across all repos or one repo. strategy=name is strict name/signature matching; strategy=intent uses broader tokenized matching (multi-word queries work, e.g. 'send notification email'). ranked=true returns scored candidates (qualifiedName 'EnclosingType.Member' for class members; enclosing-type names join intent matching; test files rank lower) and honors strategy plus the kind/language/filePath filters. A dotted Owner.member query ('FixStage.run', 'pkg.Cls.m') matches the member on its owner. A business phrase with no identifier → search_regex first; the code itself → get_symbol_source. excludeTests=true drops test-path results entirely.",
     input: schemas.searchSymbolsSchema(limits.maxResultLimit),
     inputSchema: {
       type: "object",
@@ -183,7 +183,7 @@ export function buildSearchTools(deps: CodebaseIndexDeps): AnyToolDefinition[] {
 
   const findImplementations = defineTool({
     name: "find_implementations",
-    description: "Which classes implement an interface: classes/structs implementing a named interface (IMPLEMENTS edges), e.g. find_implementations('IUserRepository') for .NET/C# DI tracing. IMPLEMENTS edges are emitted by the C# extractor only, so a TypeScript repo returns empty regardless of what it declares. excludeTests=true drops test-path results entirely (test doubles/fakes are usually most implementations). A Vue component name returns notApplicable with the component symbol — who renders one is a USES_COMPONENT edge (find_impact_files / get_call_chain callers).",
+    description: "Which classes implement an interface: classes/structs implementing a named interface (IMPLEMENTS edges), e.g. find_implementations('IUserRepository') for .NET/C# DI tracing. IMPLEMENTS edges come from the C# extractor and, for Python, from typing.Protocol classes: a class that lists the Protocol as a base, or whose methods structurally fit its members; a TypeScript repo returns empty regardless of what it declares. excludeTests=true drops test-path results entirely (test doubles/fakes are usually most implementations). A Vue component name returns notApplicable with the component symbol — who renders one is a USES_COMPONENT edge (find_impact_files / get_call_chain callers).",
     input: schemas.findImplementationsSchema(limits.maxResultLimit),
     inputSchema: {
       type: "object",
