@@ -2,9 +2,11 @@
 
 - **Status:** FIXED, PARTIAL (row #3, 13 Nov 2026, branch `wt/py-gaps`: 448e663 PY-5, 89ff624 PY-7, a891148 PY-8,
   619f598 PY-6, a4b260e PY-9, then the review fixes). Leftovers 1-5 fixed by row #12 (branch `wt/py-rest`: 089a0e4
-  PY-8b, e87d81e PY-5b, e19e88d PY-5c, da05138 PY-6b, 890936e review); 6-8 remain. Needs a FULL re-index of every
-  Python repo after deploy (translate): Protocol classes change kind (and so symbol id), CALLS / IMPLEMENTS semantics
-  changed, and row #12 adds module `__all__` signatures and CALLS hints; no `INDEX_VERSION` bump.
+  PY-8b, e87d81e PY-5b, e19e88d PY-5c, da05138 PY-6b, 890936e review); 6-8 remain. Row #12's open review items
+  and the same-file bind discovery fixed by row #16 (branch `wt/py-calls`: 81df628, 9081440, 65c1239, 6e4631f).
+  Needs a FULL re-index of every Python repo after deploy (translate): Protocol classes change kind (and so symbol
+  id), CALLS / IMPLEMENTS semantics changed, and rows #12 / #16 add module `__all__` signatures and CALLS hints; no
+  `INDEX_VERSION` bump.
 - **Scenario:** translate (pure Python) after the PY-1..PY-4 tree-sitter lane went live (12 Nov). Probes from the
   translate leader: `find_implementations` on the executor Protocol (core/ports.py) empty; `get_call_chain` of the
   pipeline run path never reached `FixStage.run`; a fixture-only test linked to nothing; `search_symbols("FixStage.run")`
@@ -73,7 +75,8 @@ Items 1-5 are FIXED by row #12 — see *Row #12* below; their original text is k
   never types a non-test function. A hinted untyped row duplicating its caller's other row is demoted the
   MCP-ISSUE-052 way. translate vs the main build: one call re-labelled caller-typed, nothing else moves.
 - **Still open from the review:** a class-call `Foo.method(inst, arg)` shifts positional indexes by one;
-  constructor arguments type nothing (the anchor sits in `__init__`, the call resolves to the class).
+  constructor arguments type nothing (the anchor sits in `__init__`, the call resolves to the class). Both FIXED
+  by row #16, below.
 
 Why the set is caller-typed only (leader, 13 Nov: accuracy over recall): a candidate set must come from evidence
 — the classes callers actually pass. A name set adds every same-named method as a caller of each, and nothing in
@@ -85,7 +88,7 @@ the traversal tools hides a low-confidence CALLS row by default, so it inflates 
   reason. Missing from `NAME_ONLY_EDGE_REASONS` (`src/types/index.ts`), a traversal standing on these 0.6 rows
   reported coverage `high` with no known gap. Added; test:python-gaps checks `trace_execution_flow` from such a
   caller reports coverage below `high` with the name-only gap, and that caller-typed rows are not counted.
-- **OPEN — a same-file bare method token is bound at extraction.** `extractorEdges.ts` (shared by every language;
+- **FIXED by row #16 (65c1239, 6e4631f) — a same-file bare method token is bound at extraction.** `extractorEdges.ts` (shared by every language;
   not changed, by decision) binds `callee:m` to a same-file symbol `m` at 0.9, `resolved callee same-file`, before
   the call pass. An untyped `x.m()` beside a same-file method `m` is therefore never flagged as an untyped receiver,
   and PY-6b never sees it. Repro (python-gaps fixture shape): one file with `class GoA: def go(self, x): x.ping()`,
@@ -93,6 +96,33 @@ the traversal tools hides a low-confidence CALLS row by default, so it inflates 
   out `resolved callee same-file` 0.9 instead of `resolved callee by name (untyped receiver)` 0.6. Enhancement:
   skip the extraction-time same-file bind for a Python bare token whose receiver is not `self`/`cls` (the
   extractor could mark it), so the call pass flags it.
+
+### Row #16 (13 Nov 2026, branch `wt/py-calls`) — row #12's open items
+
+- **Class calls, 81df628.** A call on a class (`Foo.m(...)` for a class defined, imported or star-imported here;
+  `cls.m(...)`) writes `$<i>` argument slots in its `pyargs:` hint instead of `#<i>`. The rebuild reads `$<pos+1>`
+  for a callee whose first parameter is `self` (an instance method reached through its class, PEP 695
+  `def m[T](self, …)` included) and `$<pos>` for a static / class method. The same-file 1-hop skips the explicit
+  self of `cls.m(inst, x)`. An imported ALL-CAPS name (`REGISTRY.register(a, b)`) is an instance, not a class.
+- **Constructor arguments, 9081440.** `Foo(x)` resolves to the class, so an `__init__` parameter is also typed by
+  the callers of its class (no self shift, `$` slots included). `self.f.m()` where `__init__` sets `self.f = p`
+  from an untyped parameter carries receiver ref `@<pos>:<p>`, resolved through the caller's class's `__init__`
+  (the last one defined, as at runtime). An inherited `__init__` (constructing a subclass) is not followed.
+- **Same-file bind, 65c1239 + 6e4631f.** The Python extractor marks a CALLS edge reached only from `obj.m()` on a
+  receiver that is not `self` / `cls` / an imported module (`pyobj`); `resolveIntraFileEdges` skips the same-file
+  bind for it and strips the mark (never stored). The call pass binds it as `resolved callee by name (untyped
+  receiver)` 0.6 on the first same-file `m` — the target extraction used to bind — so only the flag changes, and
+  PY-6b can type it. No other language's edge carries the mark: a scratch FULL index vs 804ab0c is sha256-identical
+  for ssnet (C#, 22 774 edges) and for codebase-index-mcp's TS / MJS edges.
+- **translate, scratch FULL vs 804ab0c (dbcab89):** 55 CALLS rows `resolved callee same-file` 0.9 → `resolved callee
+  by name (untyped receiver)` 0.6 with the target unchanged; one row retargets, `CutExecutor.answer` →
+  `MockExecutor.answer` caller-typed (correct: `CutExecutor(MockExecutor(...))`, test_stage_extract.py:361).
+- **Consequence, by design:** an `r.go(P())` whose own receiver nothing types is now an untyped anchor, and the
+  review #1 rule keeps an anchor's `pyargs` out of the caller set, so it no longer types `go`'s parameters. Before,
+  it did so standing on a same-file 0.9 that was itself a name guess.
+- **Discovery (not fixed):** a nested-class construction `Outer.Inner(x)` never resolves — the token `Outer.Inner`
+  ends an external boundary (the class-receiver branch looks for a METHOD named `Inner`), so `Inner.__init__` has
+  no caller.
 
 ### Review fixes (independent review of the five commits)
 
