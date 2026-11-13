@@ -10,6 +10,7 @@ import { pathToFileURL } from "node:url";
 
 import Database from "better-sqlite3";
 
+import { termScanPersistFileName } from "../services/docs/termScan.js";
 import { parseStatusPorcelainV2 } from "../services/git/gitHelpers.js";
 import { applyFreshness, changedUnderPrefixes, computeTreeKey, createFreshnessGate, clearRepairNeeded, DEFAULT_STALE_RUN_MS, liveRunMarkers, markRepairNeeded, RUN_MARKER_STALE_MARGIN_MS, pathsChangedSince, readDirtyLedger, readRepairNeeded, recordDirtyLedger, removeRepoStateFiles, tryAcquireLock, UNREADABLE, watcherRunPlan, type RepoTreeState, type TreeKey } from "./freshness.js";
 import { GraphStore } from "../repositories/graphStore.js";
@@ -1388,6 +1389,19 @@ test("remove_repository's state sweep also removes orphan .tmp flag files of tha
     for (const f of ["repair-r-1-2-3.json.77.tmp", "repairtry-r-1-2-4.json.77.tmp", "repair-r-b-1-2-3.json.77.tmp"]) fs.writeFileSync(path.join(dir, f), "{");
     assert.deepEqual(removeRepoStateFiles(dir, "r"), ["repair-r-1-2-3.json.77.tmp", "repairtry-r-1-2-4.json.77.tmp"]);
     assert.deepEqual(fs.readdirSync(dir), ["repair-r-b-1-2-3.json.77.tmp"]);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("MCP-ISSUE-131 (c): remove_repository's state sweep removes that repo's term-key cache by exact name, never a repo whose id extends it", () => {
+  const dir = mkdtempSync(path.join(tmpdir(), "cim-termkeys-"));
+  try {
+    const aria = termScanPersistFileName("wec.aria");
+    const wt = termScanPersistFileName("wec.aria-wt-tech-fix");
+    for (const f of [aria, `${aria}.123.0a1b2c3d.tmp`, wt, `${wt}.123.0a1b2c3d.tmp`]) fs.writeFileSync(path.join(dir, f), "{}");
+    assert.deepEqual(removeRepoStateFiles(dir, "wec.aria"), [aria, `${aria}.123.0a1b2c3d.tmp`].sort());
+    assert.deepEqual(fs.readdirSync(dir).sort(), [wt, `${wt}.123.0a1b2c3d.tmp`].sort(), "the worktree repo's cache is kept");
+    assert.deepEqual(removeRepoStateFiles(dir, "wec.aria-wt-tech-fix"), [wt, `${wt}.123.0a1b2c3d.tmp`].sort());
+    assert.deepEqual(fs.readdirSync(dir), []);
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 

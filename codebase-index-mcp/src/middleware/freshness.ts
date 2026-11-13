@@ -23,6 +23,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { promisify } from "node:util";
 
+import { termScanPersistFileName } from "../services/docs/termScan.js";
 import { parseStatusPorcelainV2 } from "../services/git/gitHelpers.js";
 import type { IndexMode, IndexRunResult } from "../types/index.js";
 
@@ -491,7 +492,11 @@ export function removeRepoStateFiles(lockDir: string, repoId: string): string[] 
       const pre = repairPrefix(kind as "repair" | "repairtry", repoId);
       return name.startsWith(pre) && /^\d+-\d+-\d+\.json\.\d+\.tmp$/.test(name.slice(pre.length));
     });
-  const exact = new Set([path.basename(ledgerFileFor(lockDir, repoId)), ...repairNames(lockDir, "repair", repoId), ...repairNames(lockDir, "repairtry", repoId)]);
+  // MCP-ISSUE-131 (c): the term-scan key cache, by its exact name (a prefix would catch `wec.aria-wt-x` for `wec.aria`),
+  // and a temp file its atomic write left behind.
+  const termKeys = termScanPersistFileName(repoId);
+  const termKeysTmp = (name: string): boolean => name.startsWith(`${termKeys}.`) && /^\d+\.[0-9a-f]{8}\.tmp$/.test(name.slice(termKeys.length + 1));
+  const exact = new Set([path.basename(ledgerFileFor(lockDir, repoId)), termKeys, ...repairNames(lockDir, "repair", repoId), ...repairNames(lockDir, "repairtry", repoId)]);
   let names: string[];
   try {
     names = fs.readdirSync(lockDir);
@@ -500,7 +505,7 @@ export function removeRepoStateFiles(lockDir: string, repoId: string): string[] 
   }
   const removed: string[] = [];
   for (const name of names) {
-    if (!exact.has(name) && !isMarker(name) && !orphanTmp(name)) continue;
+    if (!exact.has(name) && !isMarker(name) && !orphanTmp(name) && !termKeysTmp(name)) continue;
     try {
       fs.unlinkSync(path.join(lockDir, name));
       removed.push(name);
