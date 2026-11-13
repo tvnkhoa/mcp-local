@@ -183,6 +183,30 @@ export function linkTestsToSource(
   // ENH-029-D: a persistence-layer change must run the integration tests even when their names
   // don't share the changed file's tokens — admit them on path so the boost below can rank them.
   const targetIsInfraPersistence = Boolean(targetNormalized) && !targetIsTest && isInfraPersistencePath(targetNormalized!);
+  // PY-7: a fixture-only test shares no name with the source it exercises, so when probing a source file the
+  // tests that reach it through a conftest fixture are admitted by that edge path instead.
+  const fixtureReachingTests =
+    targetNormalized && !targetIsTest && /\.pyi?$/i.test(targetNormalized)
+      ? new Set(
+          (
+            db
+              .prepare(
+                `
+                select distinct replace(sf.file_path, char(92), '/') as testFile
+                from symbols st
+                inner join edges e2 on e2.repo_id = st.repo_id and e2.to_id = st.symbol_id and e2.type = 'CALLS'
+                inner join symbols fx on fx.repo_id = e2.repo_id and fx.symbol_id = e2.from_id
+                inner join edges e on e.repo_id = fx.repo_id and e.to_id = fx.symbol_id and e.type = 'CALLS'
+                inner join symbols sf on sf.repo_id = e.repo_id and sf.symbol_id = e.from_id
+                where st.repo_id = ? and replace(st.file_path, char(92), '/') = ?
+                  and fx.kind = 'function' and replace(fx.file_path, char(92), '/') like '%conftest.py'
+                limit 500
+                `
+              )
+              .all(repoId, targetNormalized) as { testFile: string }[]
+          ).map((r) => r.testFile)
+        )
+      : new Set<string>();
   const selectedTests = targetNormalized
     ? (targetIsTest
         ? testFiles.filter((x) => x === targetNormalized)
@@ -192,7 +216,8 @@ export function linkTestsToSource(
                 normalizeBase(x) === normalizeBase(targetNormalized) ||
                 x.includes(normalizeBase(targetNormalized)) ||
                 sharedTokenCoverage(testTokensOf(x), targetTokens) >= 0.5 ||
-                (targetIsInfraPersistence && isIntegrationTestPath(x))
+                (targetIsInfraPersistence && isIntegrationTestPath(x)) ||
+                fixtureReachingTests.has(x)
             )
             .slice(0, Math.max(limit * 2, 20)))
     : testFiles.slice(0, Math.max(limit * 3, 100));
@@ -275,6 +300,30 @@ export function linkTestsToSource(
 
     for (const row of calledSourceFiles) {
       addScore(normalizePath(row.sourceFile), 0.25, "call_trace");
+    }
+
+    // PY-7 (G3): a test that only REQUESTS a conftest fixture (`def test_x(fix_stage)`) never imports or calls
+    // the code under test — the fixture does. One hop through the fixture: what the conftest function calls is
+    // what the test exercises. Scored 0.4 (clears the default minScore alone, below import + call evidence).
+    const fixtureSourceFiles = db
+      .prepare(
+        `
+        select distinct st.file_path as sourceFile
+        from edges e
+        inner join symbols sf on sf.repo_id = e.repo_id and sf.symbol_id = e.from_id
+        inner join symbols fx on fx.repo_id = e.repo_id and fx.symbol_id = e.to_id
+        inner join edges e2 on e2.repo_id = e.repo_id and e2.from_id = fx.symbol_id and e2.type = 'CALLS'
+        inner join symbols st on st.repo_id = e2.repo_id and st.symbol_id = e2.to_id
+        where e.repo_id = ? and e.type = 'CALLS' and replace(sf.file_path, char(92), '/') = ?
+          and fx.kind = 'function' and replace(fx.file_path, char(92), '/') like '%conftest.py'
+        limit 500
+        `
+      )
+      .all(repoId, testFile) as { sourceFile: string }[];
+
+    for (const row of fixtureSourceFiles) {
+      const sourceFile = normalizePath(row.sourceFile);
+      if (!isTestPath(sourceFile)) addScore(sourceFile, 0.4, "fixture_trace");
     }
 
     // ENH-029-D: boost the integration test ↔ changed-persistence-file link so the round-trip test

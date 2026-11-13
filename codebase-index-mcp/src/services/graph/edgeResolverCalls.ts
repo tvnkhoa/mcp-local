@@ -42,6 +42,35 @@ const INTERFACE_METHOD_REASON = "resolved interface method";
 const INTERFACE_METHOD_UNPROVEN_REASON = "resolved interface method (unproven receiver)";
 const NAME_ONLY_REASONS: ReadonlySet<string> = new Set([NAME_ONLY_REASON, NAME_ONLY_AMBIGUOUS_REASON]);
 
+/** PY-7: a test or fixture parameter bound to the fixture of that name in the nearest enclosing conftest.py. */
+const PYTEST_FIXTURE_REASON = "resolved pytest fixture (nearest conftest)";
+const PYTEST_FILE = /(^|\/)(test_[^/]+|[^/]+_test|conftest)\.py$/i;
+
+function isPytestFile(filePath: string): boolean {
+  return PYTEST_FILE.test(normalizeFilePath(filePath));
+}
+
+/** The function of this name in the conftest.py nearest to `fromFile` up its directory tree (its own directory first). */
+export function nearestConftestDefinition<T extends { filePath: string; kind: string }>(candidates: readonly T[], fromFile: string): T | undefined {
+  const fromDir = normalizeFilePath(fromFile).replace(/\/?[^/]*$/, "");
+  let best: T | undefined;
+  let bestDepth = -1;
+  for (const c of candidates) {
+    if (c.kind !== "function") continue;
+    const path = normalizeFilePath(c.filePath);
+    const m = /^(?:(.*)\/)?conftest\.py$/i.exec(path);
+    if (!m) continue;
+    const dir = m[1] ?? "";
+    if (dir !== "" && fromDir !== dir && !fromDir.startsWith(`${dir}/`)) continue;
+    const depth = dir === "" ? 0 : dir.split("/").length;
+    if (depth > bestDepth) {
+      best = c;
+      bestDepth = depth;
+    }
+  }
+  return best;
+}
+
 /** Marks the bare half of a qualified call site that a qualified sibling has already answered. */
 const SUPERSEDED_REASON = "superseded by qualified call";
 
@@ -428,6 +457,20 @@ export function resolveCallEdgesBatch(
       importedFiles
     );
 
+    // PY-7 (G3): pytest hands a test (or fixture) its fixture by PARAMETER NAME, from the nearest conftest.py
+    // up the test's directory tree. The generic pick has no notion of that tree, so a fixture name defined in
+    // two conftests went to whichever sorted first. A same-file definition or one the file imports still wins.
+    let pytestFixture = false;
+    if (!calleeName.includes(".") && isPytestFile(row.fromFile) && !(match && (match.filePath === row.fromFile || importedFiles?.has(normalizeFilePath(match.filePath))))) {
+      const fixture = nearestConftestDefinition(directCandidates, row.fromFile);
+      if (fixture) {
+        match = fixture;
+        matchVia = "receiver_type";
+        nameAmbiguous = false;
+        pytestFixture = true;
+      }
+    }
+
     if (calleeName.includes(".")) {
       const parts = calleeName.split(".").filter((x) => x.length > 0);
       const receiverType = parts.length > 1 ? parts.slice(0, -1).join(".") : "";
@@ -535,7 +578,9 @@ export function resolveCallEdgesBatch(
         : matchVia === "receiver_type"
           ? (sameFile ? 0.9 : 0.85)
           : (sameFile ? 0.9 : 0.75);
-      const reason = dispatchMethodName
+      const reason = pytestFixture
+        ? PYTEST_FIXTURE_REASON
+        : dispatchMethodName
         ? dispatchVia === "receiver_type"
           ? INTERFACE_METHOD_REASON
           : INTERFACE_METHOD_UNPROVEN_REASON

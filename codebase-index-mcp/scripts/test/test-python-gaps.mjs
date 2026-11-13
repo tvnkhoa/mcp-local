@@ -103,6 +103,23 @@ try {
   assert(["MockExecutor", "ManualExecutor", "SyncExecutor", "BatchRunner"].every((c) => driveCalls.some((e) => e.toName === "run" && e.toParent === c && e.reason === "interface-dispatch")),
     "PY-5 the call dispatches to each implementer's run", driveCalls.map((e) => `${e.toParent}.${e.toName} (${e.reason})`));
 
+  // ── PY-7 ──
+  const fixtureOf = (testName, testFile) => edges.filter((e) => e.type === "CALLS" && e.fromName === testName && e.fromFile === testFile && e.toName === "stage");
+  const unitStage = fixtureOf("test_runs", "tests/unit/test_smoke.py");
+  assert(unitStage.length === 1 && unitStage[0].toFile === "tests/unit/conftest.py" && unitStage[0].reason === "resolved pytest fixture (nearest conftest)",
+    "PY-7 test_runs(stage) in tests/unit/ → tests/unit/conftest.py stage (nearest conftest wins over tests/ and tests/other/)", unitStage);
+  const rootStage = fixtureOf("test_root", "tests/test_root_smoke.py");
+  assert(rootStage.length === 1 && rootStage[0].toFile === "tests/conftest.py", "PY-7 test_root(stage) in tests/ → tests/conftest.py stage", rootStage);
+  assert(edges.some((e) => e.type === "CALLS" && e.fromName === "stage" && e.fromFile === "tests/unit/conftest.py" && e.toName === "FixStage" && e.toFile === "src/flow/stages/fix.py"),
+    "PY-7 the fixture's own call FixStage() → the FixStage class", show((e) => e.fromFile === "tests/unit/conftest.py"));
+  const linkRows = (r) => r?.links ?? r?.results ?? r?.pairs ?? [];
+  const fromTest = linkRows(await call("link_tests_to_source", { repoId, filePath: "tests/unit/test_smoke.py", profile: "verbose" }));
+  const fixLink = fromTest.find((l) => (l.sourceFile ?? "").replace(/\\/g, "/") === "src/flow/stages/fix.py");
+  assert(fixLink && (fixLink.reasons ?? []).includes("fixture_trace"), "PY-7 link_tests_to_source maps the fixture-only test_smoke.py → fix.py (default minScore)", fromTest);
+  assert(!fromTest.some((l) => (l.sourceFile ?? "").replace(/\\/g, "/") === "src/flow/stages/draft.py"), "PY-7 the overridden root fixture's source (draft.py) is not linked to test_smoke.py", fromTest);
+  const fromSource = linkRows(await call("link_tests_to_source", { repoId, filePath: "src/flow/stages/fix.py", profile: "verbose" }));
+  assert(fromSource.some((l) => (l.testFile ?? "").replace(/\\/g, "/") === "tests/unit/test_smoke.py"), "PY-7 probing fix.py finds the fixture-only test_smoke.py", fromSource);
+
   // Scoped re-index: touch one implementer; the rebuilt-whole IMPLEMENTS set must not move.
   const before = implementsKey(edges);
   fs.appendFileSync(path.join(repoDir, "src", "flow", "executors", "mock.py"), "\n# touched\n");
