@@ -8,7 +8,9 @@ import test from "node:test";
 import Database from "better-sqlite3";
 
 import { GraphStore } from "./graphStore.js";
-import { SEED_TABLES, SeedError, seedFromParent, unhandledSeedTables } from "./seedStore.js";
+import { FULL_BASE_LOOKBACK, SEED_TABLES, SeedError, seedFromParent, unhandledSeedTables } from "./seedStore.js";
+import { GIT_SCOPE_RUN_LOOKBACK, versionEscalationFor } from "../services/indexing/runPolicy.js";
+import { INDEX_VERSION } from "../services/indexing/indexPipeline.js";
 import { ftsIntegrityCheck } from "./scopedRunStore.js";
 import { createIndexRunner } from "../services/indexing/indexRunner.js";
 
@@ -378,6 +380,61 @@ test("follow-up (b): the caller's guard runs inside the copy transaction — a r
       store.close();
     }
     for (const [table, list] of Object.entries(rows(dbPath, "seeded"))) assert.equal(list.length, 0, `${table}: nothing seeded`);
+  } finally {
+    rmSync(repo, { recursive: true, force: true });
+  }
+}));
+
+test("FULL_BASE_LOOKBACK mirrors runPolicy's GIT_SCOPE_RUN_LOOKBACK", () => {
+  assert.equal(FULL_BASE_LOOKBACK, GIT_SCOPE_RUN_LOOKBACK);
+});
+
+for (const [label, fullVersion, baseVersion] of [
+  ["an older full build under this server's incremental (wec.aria 339b6b3a)", "v1-old-build", INDEX_VERSION],
+  ["this server's full build under a newer build's incremental (review finding 1)", INDEX_VERSION, "v999-newer-build"]
+] as const) {
+  test(`MCP-ISSUE-130 (2): a parent whose rows mix index versions is not vouched for — ${label}; PARENT_UNVOUCHED, nothing written`, withTmp(async (dir) => {
+    const repo = makeRepo();
+    try {
+      const dbPath = path.join(dir, "g.db");
+      await fullIndex(dbPath, "parent", repo);
+      rawDb(dbPath, (db) => {
+        db.prepare(`update index_runs set index_version = ? where repo_id = 'parent' and mode = 'full'`).run(fullVersion);
+        addRunLike(db, "parent", { run_id: "incr-base", mode: "incremental", status: "ok", index_version: baseVersion, started_at: "2999-01-01T00:00:00.000Z", finished_at: "2999-01-01T00:00:01.000Z", skip_reason: null });
+      });
+      const store = new GraphStore(dbPath);
+      try {
+        const reason = new RegExp(`mix index versions \\(fully built by ${fullVersion}, last complete run by ${baseVersion}\\)`);
+        assert.match(store.seedRefusal("parent") ?? "", reason, "refused before the ancestry check, so the job runs full at once");
+        assert.equal(store.seedBaseSha("parent"), null);
+        assert.throws(
+          () => seedFromParent(store, { parentRepoId: "parent", childRepoId: "seeded", childRepoPath: slash(repo) }),
+          (e: unknown) => e instanceof SeedError && e.code === "PARENT_UNVOUCHED" && reason.test(e.message)
+        );
+      } finally {
+        store.close();
+      }
+      for (const [table, list] of Object.entries(rows(dbPath, "seeded"))) assert.equal(list.length, 0, `${table}: nothing seeded`);
+    } finally {
+      rmSync(repo, { recursive: true, force: true });
+    }
+  }));
+}
+
+test("MCP-ISSUE-130 (2): a seed whose base run and full build agree on this version carries it; the child does not escalate", withTmp(async (dir) => {
+  const repo = makeRepo();
+  try {
+    const dbPath = path.join(dir, "g.db");
+    await fullIndex(dbPath, "parent", repo);
+    const store = new GraphStore(dbPath);
+    try {
+      seedFromParent(store, { parentRepoId: "parent", childRepoId: "seeded", childRepoPath: slash(repo) });
+      const v = rawDb(dbPath, (db) => (db.prepare(`select index_version as v from index_runs where repo_id = 'seeded'`).get() as { v: string }).v);
+      assert.equal(v, INDEX_VERSION);
+      assert.equal(versionEscalationFor(store, "seeded"), null);
+    } finally {
+      store.close();
+    }
   } finally {
     rmSync(repo, { recursive: true, force: true });
   }

@@ -6,7 +6,8 @@ import { assertSafeRepoFilePath } from "../../services/refactor/refactorUtils.js
 import { CITATIONS_CONFIG_PATH, loadCitationConfig } from "../../services/docs/citationConfig.js";
 import { findCitations } from "../../services/docs/annotationScanner.js";
 import { CitationResolver } from "../../services/docs/citationResolver.js";
-import { ownerMatchesSection, registryEntries, reverseReport, schemaKeys, type SchemaKey } from "../../services/docs/termLookup.js";
+import { ownerMatchesSection, registryEntries, reverseReport } from "../../services/docs/termLookup.js";
+import { SchemaKeyScanner, TERM_SCAN_MAX_FILES, withheldTermUsages, type TermScanFile, type TermScanResult } from "../../services/docs/termScan.js";
 import type { CitationRow } from "../../repositories/annotationsStore.js";
 import { notFound } from "@mcp/core";
 import fs from "node:fs";
@@ -504,34 +505,28 @@ function readCitations(store: GraphStore, repoId: string, target: string | undef
   };
 }
 
-const TERM_SCAN_MAX_FILES = 5000;
-const TERM_SCAN_MAX_BYTES = 512 * 1024;
-/** Per-file keys by mtime+size: reading ~800 files is the whole cost of a term call (7 s cold on wec.aria). */
-const schemaKeyCache = new Map<string, { mtimeMs: number; size: number; keys: SchemaKey[] }>();
+/** MCP-ISSUE-131: one scanner per process — its per-file cache is shared by every repo and session. */
+const schemaKeyScanner = new SchemaKeyScanner();
 
-/** Zod shape keys across the repo's non-test TS/JS files, read from disk (R4). */
-function scanSchemaKeys(store: GraphStore, repoId: string, repoPath: string): { keys: SchemaKey[]; filesScanned: number; capped: boolean } {
-  const files = store.listIndexedFilePaths(repoId, ["typescript", "javascript"]).map((f) => f.replace(/\\/g, "/")).filter((f) => !isTestPath(f));
-  const keys: SchemaKey[] = [];
-  let filesScanned = 0;
-  for (const file of files.slice(0, TERM_SCAN_MAX_FILES)) {
+/**
+ * MCP-ISSUE-131: how long a term call waits for its usages when the repo's type program is not built yet. A cold build
+ * is ~60 s on wec.aria, so the full query budget (5 s) only delayed a "building" answer; a small repo still answers.
+ */
+export const TERM_USAGES_COLD_WAIT_MS = 500;
+
+/** Zod shape keys across the repo's non-test TS/JS files, read from disk (R4), off the event loop (MCP-ISSUE-131). */
+function scanSchemaKeys(store: GraphStore, repoId: string, repoPath: string): Promise<TermScanResult> {
+  const files: TermScanFile[] = [];
+  for (const raw of store.listIndexedFilePaths(repoId, ["typescript", "javascript"])) {
+    const relative = raw.replace(/\\/g, "/");
+    if (isTestPath(relative)) continue;
     try {
-      const absolute = assertSafeRepoFilePath(repoPath, file);
-      const st = fs.statSync(absolute);
-      if (st.size > TERM_SCAN_MAX_BYTES) continue;
-      const cached = schemaKeyCache.get(absolute);
-      const fileKeys = cached && cached.mtimeMs === st.mtimeMs && cached.size === st.size ? cached.keys : schemaKeys(fs.readFileSync(absolute, "utf8"), file);
-      if (cached?.keys !== fileKeys) {
-        if (schemaKeyCache.size >= TERM_SCAN_MAX_FILES * 2) schemaKeyCache.clear();
-        schemaKeyCache.set(absolute, { mtimeMs: st.mtimeMs, size: st.size, keys: fileKeys });
-      }
-      filesScanned++;
-      keys.push(...fileKeys);
+      files.push({ relative, absolute: assertSafeRepoFilePath(repoPath, relative) });
     } catch {
       continue;
     }
   }
-  return { keys, filesScanned, capped: files.length > TERM_SCAN_MAX_FILES };
+  return schemaKeyScanner.scan(`${repoId}\u0000${repoPath}`, files);
 }
 
 /**
@@ -584,7 +579,7 @@ async function readTerm(ctx: HandlerContext, repoId: string, term: string | unde
   } catch {
     throw notFound(`registryDoc '${registryDoc}' (from ${CITATIONS_CONFIG_PATH}) is not readable in repo '${repoId}'.`, { repoId, filePath: registryDoc });
   }
-  const scan = scanSchemaKeys(store, repoId, repo.repoPath);
+  const scan = await scanSchemaKeys(store, repoId, repo.repoPath);
   const scanMeta = { schemaFilesScanned: scan.filesScanned, ...(scan.capped && { schemaScanCapped: TERM_SCAN_MAX_FILES }) };
 
   if (!term) {
@@ -637,9 +632,9 @@ async function readTerm(ctx: HandlerContext, repoId: string, term: string | unde
  */
 async function termUsages(ctx: HandlerContext, repoId: string, term: string, keys: { filePath: string; line: number; registrySection?: string }[], limit: number): Promise<unknown> {
   const chosen = keys.find((k) => k.registrySection) ?? (keys.length === 1 ? keys[0] : undefined);
-  const answer = await exactFieldAnswer(ctx, repoId, term, chosen ? { declarationFile: chosen.filePath, declarationLine: chosen.line } : {});
+  const answer = await exactFieldAnswer(ctx, repoId, term, chosen ? { declarationFile: chosen.filePath, declarationLine: chosen.line } : {}, { coldWaitMs: TERM_USAGES_COLD_WAIT_MS });
   if (!answer) return { status: "unavailable", note: "the TypeScript lane is off (CODEBASE_INDEX_TS_LS_ENABLED) or the repo has no indexed TS/JS files." };
-  if (answer.status === "cap_breach") return { status: answer.breach.kind === "building" ? "building" : "cap_breach", coverage: "gap", accessesWithheld: true, breach: answer.breach };
+  if (answer.status === "cap_breach") return withheldTermUsages(term, answer.breach);
   const gaps = { gapCount: answer.gaps.length, gaps: answer.gaps.slice(0, limit) };
   if (answer.status !== "ok") {
     return { status: answer.status, candidates: "candidates" in answer ? answer.candidates.map((c) => ({ id: c.id, ownerName: c.ownerName, readCount: c.readCount, writeCount: c.writeCount })) : [], ...gaps };

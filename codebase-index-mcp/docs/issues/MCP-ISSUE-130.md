@@ -39,14 +39,28 @@
     - Finding 3, gate wiring: the gate takes `versionEscalation`, wired to `versionEscalationFor`. It decides the
       older-index case by the runner's own rule: a seed row counts as a full build, and runs with no full run on
       record escalate once. `getFullRunVersion` now only detects a newer build's index.
-- **Open (review finding 2, outside the file scope):** seeded worktrees (`seedStore.ts`). The seed row copies
+- **Review finding 2, FIXED 2026-11-13 (row #13, branch `wt/perf-docs`):** seeded worktrees (`seedStore.ts`). The seed row copies
   `index_version` from the parent's base run. That base can be an incremental run stamped with the new version over
   an old full build (the 339b6b3a case), and then the child never escalates. Fix: give the seed row the parent's
   full-base version, or refuse the seed when `versionEscalationFor(parent)` is non-null.
+  - Done: the second option, refusing the seed.
+    - `parentFullBaseVersion` applies `versionEscalationFor`'s rule on the seed's own connection: the newest ok
+      `full`/`seed` run within `FULL_BASE_LOOKBACK` (= `GIT_SCOPE_RUN_LOOKBACK`, asserted by a test), else the latest
+      ok full run.
+    - `seedBaseOf` refuses the parent when that version differs from its base run's ("its rows mix index versions").
+      `store.seedRefusal` therefore reports it before the ancestry check, the copy transaction re-checks it, and the
+      job runs full at once (`fallbackReason`).
+  - The first option, stamping the seed row with the full build's version, was written first and dropped in review.
+    It fixed the escalation but broke `newerBuildRefusal`, which reads the latest run's version. A v16 full build under
+    a v17 incremental, seeded as v16, would let a v16 server write over rows that v17 extracted.
+  - Cost: a new worktree of a mixed-version parent waits for one full run instead of seeding. A parent is mixed only
+    between a version change and its next full run, which the runner now makes the next run (fix part 1).
 - **Not done (by brief):** no INDEX_VERSION bump. The verdict reuse of MCP-ISSUE-127 is unchanged. The gate does not
   start a full run for the version alone: a query never pays for a whole-repo rebuild it did not cause.
 - **Evidence:**
   - `src/services/indexing/indexRunnerVersion.test.ts` (5 cases). Without the runner change, 4 of 5 fail.
   - `runPolicy.test.ts` (2 cases), `freshness.test.ts` (the MCP-ISSUE-101 part 5 case, rewritten).
   - Gate log: `~/.claude/handover/briefs/2026-11-13-mcp-local-version-escalation-evidence.md`.
+  - Finding 2: `seedStore.test.ts`. One case per direction (older full build under a newer base, and the reverse), one
+    agreeing-versions control, and the lookback mirror. The 339b6b3a-shaped case fails without the fix.
 - **Enhancement proposal:** none open.
