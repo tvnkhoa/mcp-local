@@ -36,7 +36,7 @@ export function buildSearchTools(deps: CodebaseIndexDeps): AnyToolDefinition[] {
 
   const searchSymbols = defineTool({
     name: "search_symbols",
-    description: "Search symbols across all repos or a specific repo. strategy=name is strict name/signature matching; strategy=intent uses broader tokenized matching (multi-word natural-language queries work, e.g. 'send notification email'). ranked=true returns scored/ranked candidates (with qualifiedName 'EnclosingType.Member' for class members; enclosing-type names participate in intent matching; test files get a rank penalty) and honors strategy plus the kind/language/filePath filters. excludeTests=true drops test-path results entirely.",
+    description: "Find where a symbol (class, function, method, property…) is defined, by name, across all repos or one repo. strategy=name is strict name/signature matching; strategy=intent uses broader tokenized matching (multi-word queries work, e.g. 'send notification email'). ranked=true returns scored candidates (qualifiedName 'EnclosingType.Member' for class members; enclosing-type names join intent matching; test files rank lower) and honors strategy plus the kind/language/filePath filters. A business phrase with no identifier → search_regex first; the code itself → get_symbol_source. excludeTests=true drops test-path results entirely.",
     input: schemas.searchSymbolsSchema(limits.maxResultLimit),
     inputSchema: {
       type: "object",
@@ -99,7 +99,7 @@ export function buildSearchTools(deps: CodebaseIndexDeps): AnyToolDefinition[] {
 
   const searchLiterals = defineTool({
     name: "search_literals",
-    description: "Search string-literal CONTENT (notification titles, error messages, log templates, user-facing text) across a repo's indexed code. Returns each literal with file, line, and enclosing symbol — use for 'what text does this repo emit' audits (notification catalogs, error-message inventories, i18n sweeps) instead of grep. Interpolated/template strings are indexed with {…} placeholders. excludeTests=true drops test-path results entirely.",
+    description: "Find string-literal text in code — error messages, notification titles, log templates, user-facing text — with file, line and enclosing symbol. For 'what text does this repo emit' audits (notification catalogs, error-message inventories, i18n sweeps) instead of grep; any other text → search_regex. Interpolated/template strings are indexed with {…} placeholders. excludeTests=true drops test-path results entirely.",
     input: schemas.searchLiteralsSchema(limits.maxResultLimit),
     inputSchema: {
       type: "object",
@@ -121,7 +121,7 @@ export function buildSearchTools(deps: CodebaseIndexDeps): AnyToolDefinition[] {
 
   const getSymbolSource = defineTool({
     name: "get_symbol_source",
-    description: "Return the raw source text span of a symbol (by symbolId or name) read from disk — so you can read the exact code without a separate file read. Uses the persisted end-line when available (re-index to populate), else estimates the span from the next symbol. `contextLines` adds surrounding lines; `maxLines` caps output. A stale index is reported as a non-fatal `staleWarning` (line numbers may differ from HEAD). `repoId` may be omitted with `symbolId`: the id is looked up across the indexed repos (one holding it → that repo; several → an ambiguity error naming them). A lookup by `name` needs `repoId`.",
+    description: "Read a symbol's source code (by symbolId or name) from disk — the exact span, no separate file read. Uses the persisted end-line when available (re-index to populate), else estimates the span from the next symbol. `contextLines` adds surrounding lines; `maxLines` caps output. A stale index is reported as a non-fatal `staleWarning` (line numbers may differ from HEAD). `repoId` may be omitted with `symbolId`: the id is looked up across the indexed repos (one holding it → that repo; several → an ambiguity error naming them). A lookup by `name` needs `repoId`.",
     input: schemas.getSymbolSourceSchema,
     inputSchema: {
       type: "object",
@@ -183,7 +183,7 @@ export function buildSearchTools(deps: CodebaseIndexDeps): AnyToolDefinition[] {
 
   const findImplementations = defineTool({
     name: "find_implementations",
-    description: "Find all classes or structs that implement a named interface (via IMPLEMENTS edges). Useful for .NET/C# DI tracing — e.g. find_implementations('IUserRepository') to locate concrete implementations. IMPLEMENTS edges are currently emitted by the C# extractor only, so this returns empty for a TypeScript repo regardless of what it declares. excludeTests=true drops test-path results entirely (test doubles/fakes are usually the majority of implementations). A Vue component name returns notApplicable with the component symbol — components implement nothing; who renders one is a USES_COMPONENT edge (find_impact_files / get_call_chain callers).",
+    description: "Which classes implement an interface: classes/structs implementing a named interface (IMPLEMENTS edges), e.g. find_implementations('IUserRepository') for .NET/C# DI tracing. IMPLEMENTS edges are emitted by the C# extractor only, so a TypeScript repo returns empty regardless of what it declares. excludeTests=true drops test-path results entirely (test doubles/fakes are usually most implementations). A Vue component name returns notApplicable with the component symbol — who renders one is a USES_COMPONENT edge (find_impact_files / get_call_chain callers).",
     input: schemas.findImplementationsSchema(limits.maxResultLimit),
     inputSchema: {
       type: "object",
@@ -207,7 +207,7 @@ export function buildSearchTools(deps: CodebaseIndexDeps): AnyToolDefinition[] {
 
   const routeMap = defineTool({
     name: "route_map",
-    description: "Map HTTP routes to handler methods. C# is read in full; JS/TS coverage is limited to direct app|router|fastify.VERB('/path', handler) registrations — see the empty-result hint for what is not read yet. Reads BOTH dialects: minimal-API registrations (MapGroup/MapGet/MapPost/MapPut/MapPatch/MapDelete, with the group prefix folded into an absolute routeTemplate) and attribute-routed controllers ([Route], [HttpGet], [HttpPost], ...). handlerName is the delegate at the registration site, so it stays correct when the handler is declared in another file of a partial class. Use to inspect API surface deterministically. excludeTests=true drops test-path results entirely.",
+    description: "List HTTP routes / API endpoints and the handler method serving each. C# is read in full: minimal-API registrations (MapGroup/MapGet/MapPost/MapPut/MapPatch/MapDelete, the group prefix folded into an absolute routeTemplate) and attribute-routed controllers ([Route], [HttpGet], [HttpPost], ...). JS/TS only direct app|router|fastify.VERB('/path', handler) registrations — the empty-result hint says what is not read yet. handlerName is the delegate at the registration site, so it stays correct across partial-class files. excludeTests=true drops test-path results entirely.",
     input: schemas.routeMapSchema(limits.maxResultLimit),
     inputSchema: {
       type: "object",
