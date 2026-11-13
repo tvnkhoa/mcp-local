@@ -42,6 +42,38 @@ const INTERFACE_METHOD_REASON = "resolved interface method";
 const INTERFACE_METHOD_UNPROVEN_REASON = "resolved interface method (unproven receiver)";
 const NAME_ONLY_REASONS: ReadonlySet<string> = new Set([NAME_ONLY_REASON, NAME_ONLY_AMBIGUOUS_REASON]);
 
+/** PY-6: `obj.m()` whose receiver no rule typed, bound to a method named `m` by name alone (confidence 0.6). */
+const PYTHON_UNTYPED_RECEIVER_REASON = "resolved callee by name (untyped receiver)";
+
+/** PY-7: a test or fixture parameter bound to the fixture of that name in the nearest enclosing conftest.py. */
+const PYTEST_FIXTURE_REASON = "resolved pytest fixture (nearest conftest)";
+const PYTEST_FILE = /(^|\/)(test_[^/]+|[^/]+_test|conftest)\.py$/i;
+
+function isPytestFile(filePath: string): boolean {
+  return PYTEST_FILE.test(normalizeFilePath(filePath));
+}
+
+/** The function of this name in the conftest.py nearest to `fromFile` up its directory tree (its own directory first). */
+export function nearestConftestDefinition<T extends { filePath: string; kind: string }>(candidates: readonly T[], fromFile: string): T | undefined {
+  const fromDir = normalizeFilePath(fromFile).replace(/\/?[^/]*$/, "");
+  let best: T | undefined;
+  let bestDepth = -1;
+  for (const c of candidates) {
+    if (c.kind !== "function") continue;
+    const path = normalizeFilePath(c.filePath);
+    const m = /^(?:(.*)\/)?conftest\.py$/i.exec(path);
+    if (!m) continue;
+    const dir = m[1] ?? "";
+    if (dir !== "" && fromDir !== dir && !fromDir.startsWith(`${dir}/`)) continue;
+    const depth = dir === "" ? 0 : dir.split("/").length;
+    if (depth > bestDepth) {
+      best = c;
+      bestDepth = depth;
+    }
+  }
+  return best;
+}
+
 /** Marks the bare half of a qualified call site that a qualified sibling has already answered. */
 const SUPERSEDED_REASON = "superseded by qualified call";
 
@@ -195,18 +227,32 @@ function buildPythonBases(
        from edges e
        join symbols s on s.repo_id = e.repo_id and s.symbol_id = e.from_id
        left join symbols t on t.repo_id = e.repo_id and t.symbol_id = e.to_id
-       where e.repo_id = ? and e.type = 'EXTENDS' and s.kind = 'class'
+       where e.repo_id = ? and e.type = 'EXTENDS' and s.kind in ('class', 'interface')
          and (s.file_path like '%.py' or s.file_path like '%.pyi')
        group by e.from_id, e.to_id
        order by e.from_id, pos`
     )
     .all(repoId) as { classId: string; classFile: string; toId: string; toName: string | null; pos: number }[];
+  // PY-5 review: a Protocol is kind `interface`, which the candidate map does not hold — without these a
+  // class listing a Protocol base lost the Protocol's default methods from its lookup chain.
+  const protocolsByName = new Map<string, NamedCandidate[]>();
+  for (const p of db
+    .prepare(
+      `select symbol_id as symbolId, name, file_path as filePath, kind, parent_symbol_id as parentSymbolId from symbols
+       where repo_id = ? and kind = 'interface' and (file_path like '%.py' or file_path like '%.pyi')
+       order by name, file_path, symbol_id`
+    )
+    .all(repoId) as (NamedCandidate & { name: string })[]) {
+    const list = protocolsByName.get(p.name);
+    if (list) list.push(p);
+    else protocolsByName.set(p.name, [p]);
+  }
   const bases = new Map<string, string[]>();
   for (const r of rows) {
     const name = r.toId.startsWith("base:") ? r.toId.slice(5) : r.toName;
     if (!name) continue;
-    const classes = pythonLookupFor(candidateMap).classes(name).filter((c) => c.symbolId !== r.classId);
-    const base = pickBestNamedCandidate(classes, r.classFile, ["class"], importedFilesByFile.get(normalizeFilePath(r.classFile)));
+    const classes = [...pythonLookupFor(candidateMap).classes(name), ...(protocolsByName.get(name) ?? [])].filter((c) => c.symbolId !== r.classId);
+    const base = pickBestNamedCandidate(classes, r.classFile, ["class", "interface"], importedFilesByFile.get(normalizeFilePath(r.classFile)));
     if (!base) continue;
     const list = bases.get(r.classId);
     if (!list) bases.set(r.classId, [base.symbolId]);
@@ -428,6 +474,20 @@ export function resolveCallEdgesBatch(
       importedFiles
     );
 
+    // PY-7 (G3): pytest hands a test (or fixture) its fixture by PARAMETER NAME, from the nearest conftest.py
+    // up the test's directory tree. The generic pick has no notion of that tree, so a fixture name defined in
+    // two conftests went to whichever sorted first. A same-file definition or one the file imports still wins.
+    let pytestFixture = false;
+    if (!calleeName.includes(".") && isPytestFile(row.fromFile) && !(match && (match.filePath === row.fromFile || importedFiles?.has(normalizeFilePath(match.filePath))))) {
+      const fixture = nearestConftestDefinition(directCandidates, row.fromFile);
+      if (fixture) {
+        match = fixture;
+        matchVia = "receiver_type";
+        nameAmbiguous = false;
+        pytestFixture = true;
+      }
+    }
+
     if (calleeName.includes(".")) {
       const parts = calleeName.split(".").filter((x) => x.length > 0);
       const receiverType = parts.length > 1 ? parts.slice(0, -1).join(".") : "";
@@ -435,9 +495,15 @@ export function resolveCallEdgesBatch(
       if (receiverType && memberName) {
         const iface = interfaceByName.get(receiverType);
         if (iface) {
-          const ifaceMethod = (candidateMap.get(memberName) ?? []).find(
-            (c) => c.filePath === iface.filePath && c.kind === "method"
-          );
+          const memberCandidates = candidateMap.get(memberName) ?? [];
+          // PY-5 review: a Python file often holds a Protocol and a class with the same method name
+          // (`Executor.close` beside `Store.close`); the file match alone picked whichever id sorted first.
+          // The owner link decides for Python; C# keeps the file match unchanged.
+          const ifaceMethod =
+            (isPythonFile(iface.filePath)
+              ? memberCandidates.find((c) => c.kind === "method" && c.parentSymbolId === iface.symbolId)
+              : undefined) ??
+            memberCandidates.find((c) => c.filePath === iface.filePath && c.kind === "method");
           if (ifaceMethod) {
             match = ifaceMethod;
             dispatchMethodName = memberName;
@@ -510,7 +576,10 @@ export function resolveCallEdgesBatch(
     // ISSUE-022 (Bug D): a bare-name token that resolved straight to an interface's own method
     // must fan out to implementations too — the qualified path above only fires when extraction
     // knew the receiver type. Detected via parent_symbol_id ∈ interface set.
-    if (match && !dispatchMethodName && match.kind === "method" && match.parentSymbolId && interfaceIdSet.has(match.parentSymbolId)) {
+    // PY-6: not for a Python bare token — its receiver was untyped, so it stays a flagged candidate below
+    // instead of fanning a name guess out to every Protocol implementer.
+    if (match && !dispatchMethodName && match.kind === "method" && match.parentSymbolId && interfaceIdSet.has(match.parentSymbolId) &&
+        !(isPythonFile(row.fromFile) && !calleeName.includes("."))) {
       dispatchMethodName = calleeName.split(".").pop() ?? calleeName;
       // MCP-ISSUE-060: `match` here came from a name lookup, not from a proven receiver. Measured on
       // `wec.be`: 986 of 2070 `resolved interface method` edges targeted a method name declared by two
@@ -535,7 +604,9 @@ export function resolveCallEdgesBatch(
         : matchVia === "receiver_type"
           ? (sameFile ? 0.9 : 0.85)
           : (sameFile ? 0.9 : 0.75);
-      const reason = dispatchMethodName
+      const reason = pytestFixture
+        ? PYTEST_FIXTURE_REASON
+        : dispatchMethodName
         ? dispatchVia === "receiver_type"
           ? INTERFACE_METHOD_REASON
           : INTERFACE_METHOD_UNPROVEN_REASON
@@ -546,7 +617,18 @@ export function resolveCallEdgesBatch(
             : nameAmbiguous
               ? NAME_ONLY_AMBIGUOUS_REASON
               : NAME_ONLY_REASON;
-      updates.push({ fromId: row.fromId, oldToId: row.toId, newToId: match.symbolId, confidence, reason });
+      // PY-6: a Python bare token never names a method unless the receiver was unknown (`self.` / typed
+      // receivers arrive qualified), so a bare-name hit on a method is a candidate, not a proof: below 0.7.
+      const untypedPythonReceiver =
+        !pytestFixture && !dispatchMethodName && matchVia === "name" && match.kind === "method" &&
+        !calleeName.includes(".") && isPythonFile(row.fromFile);
+      updates.push({
+        fromId: row.fromId,
+        oldToId: row.toId,
+        newToId: match.symbolId,
+        confidence: untypedPythonReceiver ? 0.6 : confidence,
+        reason: untypedPythonReceiver ? PYTHON_UNTYPED_RECEIVER_REASON : reason
+      });
 
       // Release L (MCP-ISSUE-094): the interface-dispatch fan-out is no longer written here. It is rebuilt
       // whole by `rebuildInterfaceDispatchEdges` after IMPLEMENTS resolution, from the edges this call wrote.
@@ -650,6 +732,8 @@ const MAX_INTERFACE_DISPATCH_FANOUT = 10;
  * wins), so the result does not depend on which rows a later dedup pass looks at.
  */
 export function rebuildInterfaceDispatchEdges(db: Database.Database, repoId: string): number {
+  // PY-5: Python Protocol implementers first — the fan-out below reads IMPLEMENTS.
+  rebuildPythonProtocolImplements(db, repoId);
   db.prepare(`delete from edges where repo_id = ? and type = 'CALLS' and reason = 'interface-dispatch'`).run(repoId);
   const calls = db
     .prepare(
@@ -663,18 +747,29 @@ export function rebuildInterfaceDispatchEdges(db: Database.Database, repoId: str
     .all(repoId, INTERFACE_METHOD_REASON, INTERFACE_METHOD_UNPROVEN_REASON) as { fromId: string; methodId: string; name: string; ifaceId: string }[];
   if (calls.length === 0) return 0;
   const implementorFiles = new Map<string, string[]>();
+  /** PY-6: Python implementer class ids per interface — Python files often hold several implementers. */
+  const pythonImplementors = new Map<string, string[]>();
   for (const r of db
     .prepare(
-      `select distinct e.to_id as ifaceId, s.file_path as filePath
+      `select distinct e.to_id as ifaceId, s.file_path as filePath, s.symbol_id as implId
        from edges e
        inner join symbols s on s.repo_id = e.repo_id and s.symbol_id = e.from_id
        where e.repo_id = ? and e.type = 'IMPLEMENTS' and s.kind in ('class', 'struct', 'record', 'record struct')
-       order by e.to_id, s.file_path`
+       order by e.to_id, s.file_path, s.symbol_id`
     )
-    .all(repoId) as { ifaceId: string; filePath: string }[]) {
+    .all(repoId) as { ifaceId: string; filePath: string; implId: string }[]) {
+    if (isPythonFile(r.filePath)) {
+      const ids = pythonImplementors.get(r.ifaceId);
+      if (ids) ids.push(r.implId);
+      else pythonImplementors.set(r.ifaceId, [r.implId]);
+      continue;
+    }
     const list = implementorFiles.get(r.ifaceId);
-    if (list) list.push(r.filePath);
-    else implementorFiles.set(r.ifaceId, [r.filePath]);
+    // Rows are ordered by (iface, file), so skipping a repeat of the last file keeps the old
+    // `distinct (iface, file)` list exactly, now that the row also carries the implementer id.
+    if (list) {
+      if (list[list.length - 1] !== r.filePath) list.push(r.filePath);
+    } else implementorFiles.set(r.ifaceId, [r.filePath]);
   }
   const candidateMap = buildNamedCandidateMap(db, repoId, ["function", "method", "constructor", "class"]);
   const insert = db.prepare(
@@ -690,8 +785,278 @@ export function rebuildInterfaceDispatchEdges(db: Database.Database, repoId: str
         if (!impl || impl.symbolId === call.methodId) continue;
         count += insert.run(repoId, call.fromId, impl.symbolId, repoId, call.fromId, impl.symbolId).changes;
       }
+      // PY-6: a Python implementer's own method, by owner rather than by file. A pipeline's stage list is
+      // usually longer than the C# cap, so Python Protocols get a larger one.
+      const byParent = pythonLookupFor(candidateMap).methodsByParent(call.name);
+      for (const implId of (pythonImplementors.get(call.ifaceId) ?? []).slice(0, MAX_PYTHON_PROTOCOL_DISPATCH_FANOUT)) {
+        const impl = byParent.get(implId);
+        if (!impl || impl.symbolId === call.methodId) continue;
+        count += insert.run(repoId, call.fromId, impl.symbolId, repoId, call.fromId, impl.symbolId).changes;
+      }
     }
   });
   tx();
   return count;
+}
+
+/** PY-6: fan-out cap for a call through a Python Protocol (implementers counted, not files). */
+const MAX_PYTHON_PROTOCOL_DISPATCH_FANOUT = 40;
+
+/** PY-5: the two reasons `rebuildPythonProtocolImplements` writes; it owns every IMPLEMENTS edge carrying one. */
+export const PROTOCOL_EXPLICIT_REASON = "base_list protocol";
+export const PROTOCOL_STRUCTURAL_REASON = "structural protocol";
+/** Not part of a Protocol's structural contract: every class has them. */
+const PROTOCOL_IGNORED_MEMBERS = new Set(["__init__", "__new__", "__init_subclass__", "__class_getitem__", "__post_init__"]);
+
+/**
+ * PY-5 (G1): rebuild every Python Protocol IMPLEMENTS edge of the repo from scratch — a pure function of the
+ * Python class / interface / method symbols and their EXTENDS rows, so a scoped run lands where a full run does.
+ *
+ * A Python `Protocol` is stored as kind `interface` (the extractor). PEP 544 typing is structural, so:
+ *   - a class listing a Protocol (or a Protocol's sub-Protocol) among its bases implements it — 0.95, explicit;
+ *   - any other class whose methods, its own plus those up its in-repo base chain, cover every member the
+ *     Protocol declares (its own plus its parent Protocols') implements it — 0.8, structural. A Protocol with
+ *     no method members (attributes only) has no structural implementers: it would match every class.
+ * Base names are bound with the call lane's picker (same file, imported file, tie-break), from the
+ * `base:<Name>` token or the resolved target's name, so the result does not depend on EXTENDS resolution state.
+ */
+export function rebuildPythonProtocolImplements(db: Database.Database, repoId: string): number {
+  db.prepare(`delete from edges where repo_id = ? and type = 'IMPLEMENTS' and reason in (?, ?)`).run(
+    repoId,
+    PROTOCOL_EXPLICIT_REASON,
+    PROTOCOL_STRUCTURAL_REASON
+  );
+  type TypeRow = { symbolId: string; name: string; kind: string; filePath: string };
+  const types = db
+    .prepare(
+      `select symbol_id as symbolId, name, kind, file_path as filePath from symbols
+       where repo_id = ? and kind in ('class', 'interface') and (file_path like '%.py' or file_path like '%.pyi')
+       order by name, file_path, symbol_id`
+    )
+    .all(repoId) as TypeRow[];
+  if (!types.some((t) => t.kind === "interface")) return 0;
+
+  const byName = new Map<string, TypeRow[]>();
+  for (const t of types) {
+    const list = byName.get(t.name);
+    if (list) list.push(t);
+    else byName.set(t.name, [t]);
+  }
+  const byId = new Map(types.map((t) => [t.symbolId, t]));
+
+  const methodsByOwner = new Map<string, Map<string, string | null>>();
+  for (const m of db
+    .prepare(
+      `select name, parent_symbol_id as ownerId, signature from symbols
+       where repo_id = ? and kind = 'method' and parent_symbol_id is not null
+         and (file_path like '%.py' or file_path like '%.pyi')
+       order by parent_symbol_id, name`
+    )
+    .all(repoId) as { name: string; ownerId: string; signature: string | null }[]) {
+    if (!byId.has(m.ownerId)) continue;
+    const map = methodsByOwner.get(m.ownerId);
+    if (!map) methodsByOwner.set(m.ownerId, new Map([[m.name, m.signature]]));
+    else if (!map.has(m.name)) map.set(m.name, m.signature);
+  }
+
+  const importedFilesByFile = buildImportedFilesByFile(db, repoId);
+  const basesById = new Map<string, string[]>();
+  for (const r of db
+    .prepare(
+      `select e.from_id as fromId, e.to_id as toId, t.name as toName, min(e.rowid) as pos
+       from edges e
+       join symbols s on s.repo_id = e.repo_id and s.symbol_id = e.from_id
+       left join symbols t on t.repo_id = e.repo_id and t.symbol_id = e.to_id
+       where e.repo_id = ? and e.type = 'EXTENDS' and s.kind in ('class', 'interface')
+         and (s.file_path like '%.py' or s.file_path like '%.pyi')
+       group by e.from_id, e.to_id
+       order by e.from_id, pos`
+    )
+    .all(repoId) as { fromId: string; toId: string; toName: string | null }[]) {
+    const from = byId.get(r.fromId);
+    const name = r.toId.startsWith("base:") ? r.toId.slice(5) : r.toName;
+    if (!from || !name) continue;
+    const candidates = (byName.get(name) ?? []).filter((c) => c.symbolId !== r.fromId);
+    const base = pickBestNamedCandidate(candidates, from.filePath, ["interface", "class"], importedFilesByFile.get(normalizeFilePath(from.filePath)));
+    if (!base) continue;
+    const list = basesById.get(r.fromId);
+    if (!list) basesById.set(r.fromId, [base.symbolId]);
+    else if (!list.includes(base.symbolId)) list.push(base.symbolId);
+  }
+
+  /** The type itself and every in-repo type up its base chain, breadth-first, capped like the call lane's MRO walk. */
+  const ancestry = (id: string): string[] => {
+    const out: string[] = [];
+    const queue = [id];
+    while (queue.length > 0 && out.length < MAX_PYTHON_MRO_CLASSES) {
+      const next = queue.shift()!;
+      if (out.includes(next)) continue;
+      out.push(next);
+      queue.push(...(basesById.get(next) ?? []));
+    }
+    return out;
+  };
+
+  const protocols = types.filter((t) => t.kind === "interface");
+  const required = new Map<string, Map<string, string | null>>();
+  for (const p of protocols) {
+    const members = new Map<string, string | null>();
+    for (const id of ancestry(p.symbolId)) {
+      if (byId.get(id)?.kind !== "interface") continue;
+      for (const [n, sig] of methodsByOwner.get(id) ?? []) if (!PROTOCOL_IGNORED_MEMBERS.has(n) && !members.has(n)) members.set(n, sig);
+    }
+    required.set(p.symbolId, members);
+  }
+  // Built once: the class × Protocol loop below reads each list many times.
+  const requiredList = new Map([...required].map(([id, members]) => [id, [...members]] as const));
+
+  const insert = db.prepare(
+    `insert into edges (repo_id, from_id, to_id, type, confidence, reason)
+     select ?, ?, ?, 'IMPLEMENTS', ?, ?
+     where not exists (select 1 from edges where repo_id = ? and from_id = ? and to_id = ? and type = 'IMPLEMENTS')`
+  );
+  let count = 0;
+  const tx = immediateTransaction(db, () => {
+    for (const cls of types) {
+      if (cls.kind !== "class") continue;
+      const chain = ancestry(cls.symbolId);
+      const explicit = new Set(chain.filter((id) => byId.get(id)?.kind === "interface"));
+      // A Protocol listed as a base also implements the Protocols it extends.
+      for (const id of [...explicit]) for (const up of ancestry(id)) if (byId.get(up)?.kind === "interface") explicit.add(up);
+      // First along the chain wins, as attribute lookup does.
+      const available = new Map<string, string | null>();
+      for (const id of chain) for (const [n, sig] of methodsByOwner.get(id) ?? []) if (!available.has(n)) available.set(n, sig);
+      for (const p of protocols) {
+        let reason: string | null = null;
+        let confidence = 0;
+        if (explicit.has(p.symbolId)) {
+          reason = PROTOCOL_EXPLICIT_REASON;
+          confidence = 0.95;
+        } else {
+          const members = requiredList.get(p.symbolId) ?? [];
+          // PY-6: a name match alone made every class with a `run` a Stage; the signature must fit too.
+          if (members.length > 0 && members.every(([n, sig]) => available.has(n) && pythonSignaturesCompatible(sig, available.get(n) ?? null))) {
+            reason = PROTOCOL_STRUCTURAL_REASON;
+            confidence = 0.8;
+          }
+        }
+        if (!reason) continue;
+        count += insert.run(repoId, cls.symbolId, p.symbolId, confidence, reason, repoId, cls.symbolId, p.symbolId).changes;
+      }
+    }
+  });
+  tx();
+  return count;
+}
+
+type PyParam = { name: string; annotation: string | null; hasDefault: boolean; star: "" | "*" | "**" };
+
+/** `def run(self, ctx: Ctx) -> Out` → its parameters (self / cls dropped) and return annotation; null when unreadable. */
+export function parsePythonSignature(rawSignature: string | null): { params: PyParam[]; returns: string | null } | null {
+  if (!rawSignature || rawSignature.endsWith("...")) return null;
+  // A string literal (`sep=")"`, a forward reference `"Repo"`) keeps its text but loses the punctuation the
+  // bracket and comma scans below read as structure.
+  const signature = rawSignature.replace(/"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'/g, (lit) => lit.replace(/[()[\]{},=:]/g, " "));
+  const open = signature.indexOf("(");
+  if (open < 0) return null;
+  let depth = 0;
+  let close = -1;
+  for (let i = open; i < signature.length; i += 1) {
+    const ch = signature[i];
+    if (ch === "(" || ch === "[" || ch === "{") depth += 1;
+    else if (ch === ")" || ch === "]" || ch === "}") {
+      depth -= 1;
+      if (depth === 0) {
+        close = i;
+        break;
+      }
+    }
+  }
+  if (close < 0) return null;
+  const parts: string[] = [];
+  let current = "";
+  depth = 0;
+  for (const ch of signature.slice(open + 1, close)) {
+    if (ch === "(" || ch === "[" || ch === "{") depth += 1;
+    else if (ch === ")" || ch === "]" || ch === "}") depth -= 1;
+    if (ch === "," && depth === 0) {
+      parts.push(current);
+      current = "";
+    } else current += ch;
+  }
+  if (current.trim()) parts.push(current);
+  const params: PyParam[] = [];
+  for (const raw of parts.map((x) => x.trim()).filter((x) => x.length > 0 && x !== "/" && x !== "*")) {
+    const star = raw.startsWith("**") ? "**" : raw.startsWith("*") ? "*" : "";
+    const body = raw.slice(star.length);
+    const eq = topLevelIndex(body, "=");
+    const head = eq >= 0 ? body.slice(0, eq) : body;
+    const colon = topLevelIndex(head, ":");
+    params.push({
+      name: (colon >= 0 ? head.slice(0, colon) : head).trim(),
+      annotation: colon >= 0 ? head.slice(colon + 1).trim() || null : null,
+      hasDefault: eq >= 0,
+      star
+    });
+  }
+  if (params[0] && (params[0].name === "self" || params[0].name === "cls") && !params[0].star) params.shift();
+  const tail = signature.slice(close + 1);
+  const arrow = tail.indexOf("->");
+  const returns = arrow >= 0 ? tail.slice(arrow + 2).trim() || null : null;
+  return { params, returns };
+}
+
+function topLevelIndex(text: string, needle: string): number {
+  let depth = 0;
+  for (let i = 0; i < text.length; i += 1) {
+    const ch = text[i];
+    if (ch === "(" || ch === "[" || ch === "{") depth += 1;
+    else if (ch === ")" || ch === "]" || ch === "}") depth -= 1;
+    else if (ch === needle && depth === 0) return i;
+  }
+  return -1;
+}
+
+const ANNOTATION_WRAPPER = /^(?:typing\.)?(?:Optional|Annotated|Final|ClassVar)\[(.*)\]$/;
+
+/** `Optional[pkg.Foo]` → `Foo`; quotes, `| None` and a module path ignored. Null means "says nothing". */
+function annotationHead(annotation: string | null): string | null {
+  if (!annotation) return null;
+  let t = annotation.replace(/["']/g, "").trim();
+  const union = t.split("|").map((x) => x.trim()).filter((x) => x !== "None");
+  t = union[0] ?? t;
+  const wrapped = ANNOTATION_WRAPPER.exec(t);
+  if (wrapped?.[1]) t = (wrapped[1].split(",")[0] ?? "").trim();
+  const head = (t.split("[")[0] ?? "").trim().split(".").pop() ?? "";
+  // A TypeVar by convention (`T`, `TKey`, `T_co`) binds to anything: a generic Protocol's `x: T` fits `x: int`.
+  if (!head || head === "Any" || head === "object" || TYPEVAR_NAME.test(head)) return null;
+  // `List[X]` and `list[X]` are the same type.
+  return head.toLowerCase();
+}
+
+const TYPEVAR_NAME = /^(?:[A-Z]|T[A-Z0-9_]\w*|\w+_(?:co|contra))$/;
+
+/**
+ * PY-6: can an implementer method stand in for a Protocol member? Positional arity must fit (an implementer
+ * with `*args` takes any), and where both sides annotate a parameter or the return, the annotated class
+ * names must agree. An unreadable signature is not evidence against.
+ */
+export function pythonSignaturesCompatible(protocolSig: string | null, implSig: string | null): boolean {
+  const proto = parsePythonSignature(protocolSig);
+  const impl = parsePythonSignature(implSig);
+  if (!proto || !impl) return true;
+  const positional = (ps: PyParam[]) => ps.filter((x) => !x.star);
+  const protoPos = positional(proto.params);
+  const implPos = positional(impl.params);
+  const implVarArgs = impl.params.some((x) => x.star === "*");
+  if (!implVarArgs && implPos.length < protoPos.length) return false;
+  if (implPos.filter((x) => !x.hasDefault).length > protoPos.length) return false;
+  for (let i = 0; i < Math.min(protoPos.length, implPos.length); i += 1) {
+    const a = annotationHead(protoPos[i]!.annotation);
+    const b = annotationHead(implPos[i]!.annotation);
+    if (a && b && a !== b) return false;
+  }
+  const ra = annotationHead(proto.returns);
+  const rb = annotationHead(impl.returns);
+  return !(ra && rb && ra !== rb);
 }

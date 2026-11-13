@@ -38,7 +38,7 @@ export function buildGraphImpactTools(deps: CodebaseIndexDeps): AnyToolDefinitio
 
   const getDependencyGraph = defineTool({
     name: "get_dependency_graph",
-    description: "Get IMPORTS/DEPENDS_ON dependency edges for a symbol (symbolId) or module-level flow edges for a file (filePath). One required. Use profile='nano' for top-10 edge count, 'compact' (default) for all edges with minimal fields.",
+    description: "What a symbol or file depends on: IMPORTS/DEPENDS_ON edges for a symbol (symbolId) or module-level flow edges for a file (filePath); one required. Who depends on a file → find_impact_files. profile='nano' gives a top-10 edge count; 'compact' (default) all edges with minimal fields.",
     input: schemas.getDependencyGraphSchema(limits.maxDepth, limits.maxResultLimit),
     inputSchema: {
       type: "object",
@@ -60,7 +60,7 @@ export function buildGraphImpactTools(deps: CodebaseIndexDeps): AnyToolDefinitio
 
   const getCallChain = defineTool({
     name: "get_call_chain",
-    description: "Trace a call path from a symbolId (direction=callers or callees). Shows the path, not a caller list — use get_change_context for caller lists. Requires a callable symbolId (function/method), not a class. Use profile='nano' for path summary, 'compact' (default) for full edge list. excludeTests=true drops test-path results entirely. A SQL name defined at several sites (a table in archive/ and the baseline, a replaced function) binds its references to the CURRENT definition only; `sqlDefinition` says whether this site is current and lists `alsoDefinedAt` (file:line).",
+    description: "Call path between methods: the path from a callable symbolId (function/method, not a class) toward its callers or callees (direction). A path, not a list — every caller → get_change_context; forward execution sub-graph → trace_execution_flow. profile='nano' gives the first 10 hops; 'compact' (default) the full edge list. excludeTests=true drops test-path results entirely. A SQL name defined at several sites (a table in archive/ and the baseline, a replaced function) binds its references to the CURRENT definition only; `sqlDefinition` says whether this site is current and lists `alsoDefinedAt` (file:line).",
     input: schemas.getCallChainSchema(limits.maxDepth, limits.maxResultLimit),
     inputSchema: {
       type: "object",
@@ -83,7 +83,7 @@ export function buildGraphImpactTools(deps: CodebaseIndexDeps): AnyToolDefinitio
 
   const findImpactFiles = defineTool({
     name: "find_impact_files",
-    description: "Scope blast radius for a file change. view='files' (default): which files import/call symbols in this file. view='surface': which external symbols call into this file. Use before refactor_replace_preview to scope the change. profile='nano' for top-10 count, 'compact' (default) for full list. A stale index (indexed commit ≠ HEAD) is reported as a non-fatal `staleWarning` field in the response, not an error — re-index for exact results. excludeTests=true drops test-path results entirely.",
+    description: "Who imports this file? The importers and dependents of a FILE (view='files', default), or the external symbols that call into it (view='surface'). One symbol's callers → get_change_context; your diff → change_impact. Use before refactor_replace_preview to scope a change. profile='nano' gives a top-10 count; 'compact' (default) the full list. A stale index adds a non-fatal `staleWarning` (re-index for exact results). excludeTests=true drops test-path results entirely.",
     input: schemas.findImpactFilesSchema(limits.maxResultLimit),
     inputSchema: {
       type: "object",
@@ -106,7 +106,7 @@ export function buildGraphImpactTools(deps: CodebaseIndexDeps): AnyToolDefinitio
 
   const getChangeContext = defineTool({
     name: "get_change_context",
-    description: "Get callers (BFS up to depth), callees, and type deps for a symbol. Accepts symbolId or name (one required). Use profile=nano for ultra-compact, compact to reduce payload during planning, standard for balanced, verbose for debugging. A stale index (indexed commit ≠ HEAD) is reported as a non-fatal `staleWarning` field in the response, not an error. excludeTests=true drops test-path results entirely.",
+    description: "Callers of a function or symbol: who calls X (BFS up to callerDepth), plus its callees and type deps. Accepts symbolId or name (one required). One call path → get_call_chain; who imports a file → find_impact_files. profile=nano gives the top-10 callers; compact (default) for planning; standard balanced; verbose for debugging. A stale index adds a non-fatal `staleWarning`. excludeTests=true drops test-path results entirely.",
     input: schemas.getChangeContextSchema(limits.maxDepth, limits.maxResultLimit),
     inputSchema: {
       type: "object",
@@ -153,7 +153,7 @@ export function buildGraphImpactTools(deps: CodebaseIndexDeps): AnyToolDefinitio
 
   const detectChanges = defineTool({
     name: "detect_changes",
-    description: "Detect changed files from git, estimate graph impact, and compute deterministic risk scores (high/medium/low) for review prioritization. Supports policy presets (quick-triage|strict-review|release-gate|custom). Defaults baseRef to latest indexed commit when available. Each changed path says added/modified/deleted; a rename lists both paths (renamedFrom/renamedTo), and a removed path's dependents are the files whose imports still resolve to it. Range mode pairs renames at git's default similarity (-M, 50%): a move rewritten past that reads as a delete plus an add.",
+    description: "Risk score of changed files before merge or review: changed files from git, their graph impact and deterministic risk (high/medium/low). Policy presets quick-triage|strict-review|release-gate|custom. Tests to run for the diff → change_impact. baseRef defaults to the latest indexed commit when available. Each changed path says added/modified/deleted; a rename lists both paths (renamedFrom/renamedTo), and a removed path's dependents are the files whose imports still resolve to it. Range mode pairs renames at git's default similarity (-M, 50%): a move rewritten past that reads as a delete plus an add.",
     input: schemas.detectChangesSchema(limits.maxResultLimit),
     inputSchema: {
       type: "object",
@@ -229,7 +229,7 @@ export function buildGraphImpactTools(deps: CodebaseIndexDeps): AnyToolDefinitio
   const linkTestsToSource = defineTool({
     name: "link_tests_to_source",
     description:
-      "Link tests to likely source files using deterministic naming heuristics plus IMPORTS/CALLS tracing. excludeTests=true drops test-path results entirely. " +
+      "Which tests cover a source file: links tests to source files by deterministic naming heuristics plus IMPORTS/CALLS tracing. excludeTests=true drops test-path results entirely. " +
       "forWorkingTreeDiff=true answers 'which tests does my uncommitted change need': the dirty files (staged, unstaged, untracked) → reverse closure over IMPORTS, USES_COMPONENT and workspace-package imports (maxDepth, maxFiles; truncation reported) → the tests reached, every changed test file itself, and name links with score >= minScore (default 0.7 in this mode; lower ones are dropped and counted in belowMinScore). Each test carries `why`. " +
       "Per package it reads the nearest vitest/vite config lexically (include, exclude, root, test.projects; never executed — an unreadable value is named and the package dir is used) and emits one command that runs the package's own vitest binary, e.g. `cd packages/core && ./node_modules/.bin/vitest run <files>` — never a package manager, which can rewrite tracked config or create a store in the tree (node_modules must already be installed); tests no include admits are listed in `excluded` with the reason. A node:test file gets runner 'unknown' and a `node --test` hint. Nothing is executed.",
     input: schemas.linkTestsToSourceSchema(limits.maxResultLimit),
@@ -304,7 +304,7 @@ export function buildGraphImpactTools(deps: CodebaseIndexDeps): AnyToolDefinitio
 
   const traceExecutionFlow = defineTool({
     name: "trace_execution_flow",
-    description: "BFS-trace the call graph starting from an entry symbol, following CALLS edges outbound up to maxDepth levels. Returns nodes and edges forming the execution sub-graph. Use to understand how a method propagates through the codebase. excludeTests=true drops test-path results entirely.",
+    description: "Forward execution flow from an entry symbol: BFS over outbound CALLS edges up to maxDepth, returning the nodes and edges of the sub-graph — how a method propagates through the codebase. Inbound callers → get_change_context; a single path → get_call_chain. excludeTests=true drops test-path results entirely.",
     input: schemas.traceExecutionFlowSchema,
     inputSchema: {
       type: "object",

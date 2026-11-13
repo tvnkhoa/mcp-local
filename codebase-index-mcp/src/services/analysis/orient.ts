@@ -56,7 +56,7 @@ const INTENT_RULES: IntentRule[] = [
   },
   {
     id: "grep-pattern",
-    keywords: ["grep", "pattern", "regex", "todo", "fixme", "string literal", "config key", "search text", "find text"],
+    keywords: ["grep", "pattern", "regex", "todo", "fixme", "config key", "search text", "find text"],
     recommendedTools: [
       { tool: "search_regex", why: "MCP-native grep: matches with context lines AND the enclosing symbol", args: { scanAll: false } },
       { tool: "search_literals", why: "string/interpolated/template literals specifically" }
@@ -65,7 +65,7 @@ const INTENT_RULES: IntentRule[] = [
   },
   {
     id: "file-structure",
-    keywords: ["what is in this file", "file structure", "exports", "what does this file", "overview of the file", "who imports"],
+    keywords: ["what is in this file", "file structure", "exports", "what does this file", "overview of the file"],
     recommendedTools: [
       { tool: "get_file_summary", why: "exports, imports and importedBy — the light call", args: { profile: "compact" } },
       { tool: "get_file_context", why: "all symbols + edges, and takes filePaths[] for up to 50 files at once" }
@@ -90,7 +90,7 @@ const INTENT_RULES: IntentRule[] = [
   },
   {
     id: "docs-search",
-    keywords: ["documentation", "docs say", "which doc", "readme", "adr", "decision record", "is it documented"],
+    keywords: ["documentation", "docs say", "which doc", "readme", "adr", "decision record", "documented"],
     recommendedTools: [
       { tool: "query_docs", why: "full-text over indexed markdown: headings, prose sections and fenced blocks", args: { mode: "search" } }
     ],
@@ -137,9 +137,9 @@ const INTENT_RULES: IntentRule[] = [
   },
   {
     id: "blast-radius",
-    keywords: ["blast radius", "impact", "what breaks", "who depends", "downstream", "ripple", "affected by", "dependents"],
+    keywords: ["blast radius", "impact", "what breaks", "who depends", "downstream", "ripple", "affected by", "dependents", "who imports", "importers", "imported by"],
     recommendedTools: [
-      { tool: "find_impact_files", why: "files/symbols that depend on the target" },
+      { tool: "find_impact_files", why: "who imports / depends on the target file: importers and dependents (view:'surface' for the calling symbols)" },
       { tool: "change_impact", why: "if you've already edited — maps the diff to dependents + covering tests" }
     ],
     caveats: ["impact reflects the indexed commit; re-index (mode='dirty') if the working tree changed.", "DI/reflection-wired types return a wiringNote instead of static callers."]
@@ -155,12 +155,95 @@ const INTENT_RULES: IntentRule[] = [
   },
   {
     id: "trace-flow",
-    keywords: ["trace", "execution flow", "call path", "what calls", "call chain", "flows through"],
+    keywords: ["trace", "execution flow", "flows through"],
     recommendedTools: [
       { tool: "trace_execution_flow", why: "forward execution flow from an entry symbol" },
       { tool: "get_call_chain", why: "callers/callees to a fixed depth" }
     ],
     caveats: ["unresolved call edges lower coverage; reflection/DI hops are not traced."]
+  },
+  {
+    id: "call-path",
+    keywords: ["call path", "call chain", "path between", "path from"],
+    recommendedTools: [
+      { tool: "get_call_chain", why: "the call path from a callable symbolId toward its callers or callees", args: { direction: "callees" } },
+      { tool: "trace_execution_flow", why: "the whole forward execution sub-graph instead of one path" }
+    ],
+    caveats: ["needs a callable symbolId (function/method), not a class."]
+  },
+  {
+    id: "callers",
+    keywords: ["callers", "who calls", "what calls", "called by", "call sites", "who uses"],
+    recommendedTools: [
+      { tool: "get_change_context", why: "callers of a symbol (BFS to callerDepth) plus callees, by symbolId or name" },
+      { tool: "get_symbol_context_pack", why: "callers + callees + importers of a name in one call" }
+    ],
+    caveats: ["a file's importers are find_impact_files; DI/reflection-wired callers are not static edges."]
+  },
+  {
+    id: "read-source",
+    keywords: ["source code", "read the code", "read source", "show the code", "show me the code", "body of"],
+    recommendedTools: [
+      { tool: "get_symbol_source", why: "the exact source span of a symbol (by symbolId or name) — no file read" }
+    ],
+    caveats: ["a lookup by name needs repoId; a symbolId alone is resolved across indexed repos."]
+  },
+  {
+    id: "field-access",
+    keywords: ["who reads", "who writes", "reads or writes", "field access", "property access", "this property", "this field"],
+    recommendedTools: [
+      { tool: "find_field_accesses", why: "every read and write site of a property/field with its enclosing symbol", args: { mode: "all" } }
+    ],
+    caveats: ["the first TS/JS field query builds the type program in the background — retry for the exact answer when coverage is 'gap'."]
+  },
+  {
+    id: "implementations",
+    keywords: ["implementing", "implementations", "implements", "concrete class"],
+    recommendedTools: [
+      { tool: "find_implementations", why: "classes/structs implementing a named interface (IMPLEMENTS edges)" }
+    ],
+    caveats: ["IMPLEMENTS edges come from the C# extractor only; a TypeScript repo returns empty."]
+  },
+  {
+    id: "folder",
+    keywords: ["files in a folder", "files in folder", "folder summary", "files under", "files in the directory"],
+    recommendedTools: [
+      { tool: "get_folder_summary", why: "the files of a folder with per-file language, symbol and caller counts" }
+    ],
+    caveats: ["indexMeta names the indexed branch/commit — check it matches yours."]
+  },
+  {
+    id: "literal-text",
+    keywords: ["string literal", "error message", "message text", "user-facing text", "log template", "notification title"],
+    recommendedTools: [
+      { tool: "search_literals", why: "string/interpolated/template literal content with file, line and enclosing symbol" },
+      { tool: "search_regex", why: "an arbitrary pattern rather than literal content" }
+    ],
+    caveats: ["interpolated strings are indexed with {…} placeholders."]
+  },
+  {
+    id: "doc-section",
+    keywords: ["read the section", "read one section", "by heading", "heading", "doc section"],
+    recommendedTools: [
+      { tool: "query_docs", why: "read ONE section of a document by headingPrefix, headingContains or line", args: { mode: "section" } }
+    ],
+    caveats: ["needs filePath plus exactly one of headingPrefix, headingContains, line."]
+  },
+  {
+    id: "blame",
+    keywords: ["blame", "last changed", "who changed", "who wrote", "last modified", "author of"],
+    recommendedTools: [
+      { tool: "get_symbol_blame", why: "git blame (commit, author, summary) for a symbol's declaration line" }
+    ],
+    caveats: []
+  },
+  {
+    id: "index-progress",
+    keywords: ["progress", "index job", "running index", "runid"],
+    recommendedTools: [
+      { tool: "index_status", why: "state/phase/progress of an index job (by runId) or every run in flight (no runId)" }
+    ],
+    caveats: ["is the index stale at all → health_check."]
   },
   {
     id: "tests",

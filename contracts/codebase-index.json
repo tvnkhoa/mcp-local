@@ -9,7 +9,7 @@
         "openWorldHint": false,
         "readOnlyHint": true
       },
-      "description": "Composite 'what did my change affect and which tests cover it' for the working-tree diff (or a commit range): maps changed files → static dependents → covering tests, returning a ranked testsToRun list (ranked by source risk × link score; each row also carries linkScore, and a changed test file is listed as a test to run, reason 'changed itself') plus a residualRisk note for changed files with no linked test. Use after editing to run a trusted targeted test subset instead of the whole suite. Defaults baseRef to the indexed commit (working-tree diff when no new commits).",
+      "description": "Which tests to run for my change: maps the working-tree diff (or a commit range) → changed files → static dependents → covering tests, as a ranked testsToRun list (source risk × link score; each row carries linkScore; a changed test file is listed itself, reason 'changed itself') plus a residualRisk note for changed files with no linked test. One file's dependents → find_impact_files; uncommitted change + a runner command → link_tests_to_source(forWorkingTreeDiff). profile='nano' gives the top-10 tests, risk summary and counts; compact adds changed files and dependent counts; per-file dependents (impacts) only in standard/verbose. baseRef defaults to the indexed commit (working-tree diff when no new commits).",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
@@ -199,7 +199,7 @@
         "openWorldHint": false,
         "readOnlyHint": true
       },
-      "description": "Detect changed files from git, estimate graph impact, and compute deterministic risk scores (high/medium/low) for review prioritization. Supports policy presets (quick-triage|strict-review|release-gate|custom). Defaults baseRef to latest indexed commit when available. Each changed path says added/modified/deleted; a rename lists both paths (renamedFrom/renamedTo), and a removed path's dependents are the files whose imports still resolve to it. Range mode pairs renames at git's default similarity (-M, 50%): a move rewritten past that reads as a delete plus an add.",
+      "description": "Risk score of changed files before merge or review: changed files from git, their graph impact and deterministic risk (high/medium/low). Policy presets quick-triage|strict-review|release-gate|custom. Tests to run for the diff → change_impact. baseRef defaults to the latest indexed commit when available. Each changed path says added/modified/deleted; a rename lists both paths (renamedFrom/renamedTo), and a removed path's dependents are the files whose imports still resolve to it. Range mode pairs renames at git's default similarity (-M, 50%): a move rewritten past that reads as a delete plus an add.",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
@@ -392,7 +392,7 @@
         "openWorldHint": false,
         "readOnlyHint": true
       },
-      "description": "List every read/write callsite of a property (field) with its enclosing symbol — the 'who reads vs who writes this field' audit for wrong-level-resolution checks. Provide a property symbolId or a resolvable name. mode=read|write|all (default all). Returns reads/writes partitioned, each with enclosing name/file/line, plus a coverage block. Use this instead of grepping a field name across the repo. excludeTests=true drops test-path results entirely. C# fields: the PROPERTY_REF (read) / PROPERTY_WRITE (write) graph edges. TS/JS fields (Zod shape keys, field bags spread into a Zod shape, interface/class properties): the TypeScript LanguageService (engine 'typescript-language-service') — reads, writes, destructuring, z.infer types, and writes hidden in `Schema.parse({...})` literals; Vue SFCs (script and template expressions) go through Volar and are classified like TS sites at their real .vue lines; coverage 'exact' with the sites it cannot attribute listed by file in coverage.gaps (unfollowable parse arguments, dynamic obj[key], and .vue files when the Vue lane cannot run, with the reason); coverage 'gap' and no list when a time/memory cap is hit, or while the type program is still building (the first TS/JS field query after start-up; the build runs in a worker and continues in the background — retry for the exact answer). Same-named declarations come back as `candidates` (homonym functions/variables, and same-name keys of object literals no declared type covers — kind 'untyped-object-key' — as `nonMatches`): re-ask with declarationFile (+ declarationLine) or ownerName (the schema, interface or class name) to get one candidate's sites. The first TS/JS call per repo builds the program (seconds to tens of seconds); later calls are warm.",
+      "description": "Who reads or writes a property/field: every read and write site with its enclosing symbol. Provide a property symbolId or a resolvable name. mode=read|write|all (default all). Returns reads/writes partitioned, each with enclosing name/file/line, plus a coverage block. Use this instead of grepping a field name across the repo. excludeTests=true drops test-path results entirely. C# fields: the PROPERTY_REF (read) / PROPERTY_WRITE (write) graph edges. TS/JS fields (Zod shape keys, field bags spread into a Zod shape, interface/class properties): the TypeScript LanguageService (engine 'typescript-language-service') — reads, writes, destructuring, z.infer types, and writes hidden in `Schema.parse({...})` literals; Vue SFCs (script and template expressions) go through Volar and are classified like TS sites at their real .vue lines; coverage 'exact' with the sites it cannot attribute listed by file in coverage.gaps (unfollowable parse arguments, dynamic obj[key], and .vue files when the Vue lane cannot run, with the reason); coverage 'gap' and no list when a time/memory cap is hit, or while the type program is still building (the first TS/JS field query after start-up; the build runs in a worker and continues in the background — retry for the exact answer). Same-named declarations come back as `candidates` (homonym functions/variables, and same-name keys of object literals no declared type covers — kind 'untyped-object-key' — as `nonMatches`): re-ask with declarationFile (+ declarationLine) or ownerName (the schema, interface or class name) to get one candidate's sites. The first TS/JS call per repo builds the program (seconds to tens of seconds); later calls are warm.",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
@@ -458,7 +458,7 @@
         "openWorldHint": false,
         "readOnlyHint": true
       },
-      "description": "Scope blast radius for a file change. view='files' (default): which files import/call symbols in this file. view='surface': which external symbols call into this file. Use before refactor_replace_preview to scope the change. profile='nano' for top-10 count, 'compact' (default) for full list. A stale index (indexed commit ≠ HEAD) is reported as a non-fatal `staleWarning` field in the response, not an error — re-index for exact results. excludeTests=true drops test-path results entirely.",
+      "description": "Who imports this file? The importers and dependents of a FILE (view='files', default), or the external symbols that call into it (view='surface'). One symbol's callers → get_change_context; your diff → change_impact. Use before refactor_replace_preview to scope a change. profile='nano' gives a top-10 count; 'compact' (default) the full list. A stale index adds a non-fatal `staleWarning` (re-index for exact results). excludeTests=true drops test-path results entirely.",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
@@ -515,7 +515,7 @@
         "openWorldHint": false,
         "readOnlyHint": true
       },
-      "description": "Find all classes or structs that implement a named interface (via IMPLEMENTS edges). Useful for .NET/C# DI tracing — e.g. find_implementations('IUserRepository') to locate concrete implementations. IMPLEMENTS edges are currently emitted by the C# extractor only, so this returns empty for a TypeScript repo regardless of what it declares. excludeTests=true drops test-path results entirely (test doubles/fakes are usually the majority of implementations). A Vue component name returns notApplicable with the component symbol — components implement nothing; who renders one is a USES_COMPONENT edge (find_impact_files / get_call_chain callers).",
+      "description": "Which classes implement an interface: classes/structs implementing a named interface (IMPLEMENTS edges), e.g. find_implementations('IUserRepository') for .NET/C# DI tracing. IMPLEMENTS edges come from the C# extractor and, for Python, from typing.Protocol classes: a class that lists the Protocol as a base, or whose methods structurally fit its members; a TypeScript repo returns empty regardless of what it declares. excludeTests=true drops test-path results entirely (test doubles/fakes are usually most implementations). A Vue component name returns notApplicable with the component symbol — who renders one is a USES_COMPONENT edge (find_impact_files / get_call_chain callers).",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
@@ -637,7 +637,7 @@
         "openWorldHint": false,
         "readOnlyHint": true
       },
-      "description": "Trace a call path from a symbolId (direction=callers or callees). Shows the path, not a caller list — use get_change_context for caller lists. Requires a callable symbolId (function/method), not a class. Use profile='nano' for path summary, 'compact' (default) for full edge list. excludeTests=true drops test-path results entirely. A SQL name defined at several sites (a table in archive/ and the baseline, a replaced function) binds its references to the CURRENT definition only; `sqlDefinition` says whether this site is current and lists `alsoDefinedAt` (file:line).",
+      "description": "Call path between methods: the path from a callable symbolId (function/method, not a class) toward its callers or callees (direction). A path, not a list — every caller → get_change_context; forward execution sub-graph → trace_execution_flow. profile='nano' gives the first 10 hops; 'compact' (default) the full edge list. excludeTests=true drops test-path results entirely. A SQL name defined at several sites (a table in archive/ and the baseline, a replaced function) binds its references to the CURRENT definition only; `sqlDefinition` says whether this site is current and lists `alsoDefinedAt` (file:line).",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
@@ -692,7 +692,7 @@
         "openWorldHint": false,
         "readOnlyHint": true
       },
-      "description": "Get callers (BFS up to depth), callees, and type deps for a symbol. Accepts symbolId or name (one required). Use profile=nano for ultra-compact, compact to reduce payload during planning, standard for balanced, verbose for debugging. A stale index (indexed commit ≠ HEAD) is reported as a non-fatal `staleWarning` field in the response, not an error. excludeTests=true drops test-path results entirely.",
+      "description": "Callers of a function or symbol: who calls X (BFS up to callerDepth), plus its callees and type deps. Accepts symbolId or name (one required). One call path → get_call_chain; who imports a file → find_impact_files. profile=nano gives the top-10 callers; compact (default) for planning; standard balanced; verbose for debugging. A stale index adds a non-fatal `staleWarning`. excludeTests=true drops test-path results entirely.",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
@@ -801,7 +801,7 @@
         "openWorldHint": false,
         "readOnlyHint": true
       },
-      "description": "Get IMPORTS/DEPENDS_ON dependency edges for a symbol (symbolId) or module-level flow edges for a file (filePath). One required. Use profile='nano' for top-10 edge count, 'compact' (default) for all edges with minimal fields.",
+      "description": "What a symbol or file depends on: IMPORTS/DEPENDS_ON edges for a symbol (symbolId) or module-level flow edges for a file (filePath); one required. Who depends on a file → find_impact_files. profile='nano' gives a top-10 edge count; 'compact' (default) all edges with minimal fields.",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
@@ -907,7 +907,7 @@
         "openWorldHint": false,
         "readOnlyHint": true
       },
-      "description": "Get symbols and graph edges for a file (provide filePath) or multiple files (provide filePaths array). One of filePath or filePaths is required. Use profile=nano for ultra-compact planning output, compact for token-saving, standard for balanced, verbose for debug-rich.",
+      "description": "Symbols and graph edges of a file (filePath) or several (filePaths[]); one is required. Who imports this file → find_impact_files; a lighter overview → get_file_summary. profile=nano returns the top 12 symbols (20 for filePaths[]), no edges; compact (default) saves tokens; standard is balanced; verbose for debugging.",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
@@ -957,7 +957,7 @@
         "openWorldHint": false,
         "readOnlyHint": true
       },
-      "description": "File overview: exported symbols, outgoing imports, and which files import it. Use before get_file_context — lighter payload. profile='nano' for symbol count + top-5, 'compact' (default) for full summary.",
+      "description": "What is in a file: its exported symbols, outgoing imports and importedBy — lighter than get_file_context. Who depends on it (blast radius) → find_impact_files. profile='nano' gives symbol count + top-5 only (no imports); 'compact' (default) the full summary.",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
@@ -992,7 +992,7 @@
         "openWorldHint": false,
         "readOnlyHint": true
       },
-      "description": "List all files under a folder path with per-file stats (language, symbol count, caller count). Use at session start to orient — cheaper than get_file_context on individual files. Prefer this over reading file contents when you just need to find the right files. Response includes indexMeta with branch and commitSha from the last index run — verify these match your current branch before trusting file listings. After a branch switch, run index_repository(mode='full') to purge stale entries.",
+      "description": "List the files in a folder with per-file stats (language, symbol count, caller count) — the session-start orientation call, cheaper than get_file_context per file and than reading files. indexMeta carries the branch and commitSha of the last index run: check they match your branch before trusting the list; after a branch switch run index_repository(mode='full') to purge stale entries.",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
@@ -1072,7 +1072,7 @@
         "openWorldHint": false,
         "readOnlyHint": true
       },
-      "description": "Return git blame metadata for a symbol line by joining symbol location with `git blame -L line,line --porcelain`.",
+      "description": "Who last changed a symbol: git blame metadata (commit, author, summary) for its declaration line, via `git blame -L line,line --porcelain`.",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
@@ -1208,7 +1208,7 @@
         "openWorldHint": false,
         "readOnlyHint": true
       },
-      "description": "Return the raw source text span of a symbol (by symbolId or name) read from disk — so you can read the exact code without a separate file read. Uses the persisted end-line when available (re-index to populate), else estimates the span from the next symbol. `contextLines` adds surrounding lines; `maxLines` caps output. A stale index is reported as a non-fatal `staleWarning` (line numbers may differ from HEAD). `repoId` may be omitted with `symbolId`: the id is looked up across the indexed repos (one holding it → that repo; several → an ambiguity error naming them). A lookup by `name` needs `repoId`.",
+      "description": "Read a symbol's source code (by symbolId or name) from disk — the exact span, no separate file read. Uses the persisted end-line when available (re-index to populate), else estimates the span from the next symbol. `contextLines` adds surrounding lines; `maxLines` caps output. A stale index is reported as a non-fatal `staleWarning` (line numbers may differ from HEAD). `repoId` may be omitted with `symbolId`: the id is looked up across the indexed repos (one holding it → that repo; several → an ambiguity error naming them). A lookup by `name` needs `repoId`.",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
@@ -1300,7 +1300,7 @@
         "openWorldHint": false,
         "readOnlyHint": true
       },
-      "description": "Check server availability plus codebase readiness (staleness, working tree, watch state) with action hints for re-index/watch.",
+      "description": "Is the code index stale or up to date? Server availability plus readiness (staleness, working tree, watch state) with re-index/watch hints. A running index job's progress → index_status.",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
@@ -1375,7 +1375,7 @@
         "openWorldHint": false,
         "readOnlyHint": true
       },
-      "description": "With no runId: what is in flight in this server process — refreshRuns and jobs (queued/running index_repository jobs). With a runId: the state of an index_repository job: queued (waitingFor says why: another run ahead, or free RAM below CODEBASE_INDEX_MIN_FREE_RAM_MB) | running (phase, progress/total) | ok (the run summary) | failed (error). A run this server process no longer holds as a job is answered from the recorded runs (source: index_runs). An unknown runId is an error. Every answer also lists refreshRuns: the query-triggered and watcher refresh runs in flight (runId, repoId, mode, source, state running|stopping, phase, progress/total, elapsedMs, deadlineMs/deadlineAt; one past CODEBASE_INDEX_REFRESH_RUN_DEADLINE_MS is stopped). Such a runId is answered too.",
+      "description": "Progress of a running index job or refresh run. With a runId: an index_repository job's state — queued (waitingFor: a run ahead, or free RAM below CODEBASE_INDEX_MIN_FREE_RAM_MB) | running (phase, progress/total) | ok (the run summary) | failed (error); a run this process no longer holds as a job is answered from index_runs; an unknown runId is an error. With no runId: what is in flight — queued/running jobs and refreshRuns. Every answer lists refreshRuns: query-triggered and watcher refresh runs in flight (runId, repoId, mode, source, state running|stopping, phase, progress/total, elapsedMs, deadlineMs/deadlineAt; one past CODEBASE_INDEX_REFRESH_RUN_DEADLINE_MS is stopped), and such a runId is answered too. Is the index stale → health_check.",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
@@ -1395,7 +1395,7 @@
         "openWorldHint": false,
         "readOnlyHint": true
       },
-      "description": "Link tests to likely source files using deterministic naming heuristics plus IMPORTS/CALLS tracing. excludeTests=true drops test-path results entirely. forWorkingTreeDiff=true answers 'which tests does my uncommitted change need': the dirty files (staged, unstaged, untracked) → reverse closure over IMPORTS, USES_COMPONENT and workspace-package imports (maxDepth, maxFiles; truncation reported) → the tests reached, every changed test file itself, and name links with score >= minScore (default 0.7 in this mode; lower ones are dropped and counted in belowMinScore). Each test carries `why`. Per package it reads the nearest vitest/vite config lexically (include, exclude, root, test.projects; never executed — an unreadable value is named and the package dir is used) and emits one command that runs the package's own vitest binary, e.g. `cd packages/core && ./node_modules/.bin/vitest run <files>` — never a package manager, which can rewrite tracked config or create a store in the tree (node_modules must already be installed); tests no include admits are listed in `excluded` with the reason. A node:test file gets runner 'unknown' and a `node --test` hint. Nothing is executed.",
+      "description": "Which tests cover a source file: links tests to source files by deterministic naming heuristics plus IMPORTS/CALLS tracing. excludeTests=true drops test-path results entirely. forWorkingTreeDiff=true answers 'which tests does my uncommitted change need': the dirty files (staged, unstaged, untracked) → reverse closure over IMPORTS, USES_COMPONENT and workspace-package imports (maxDepth, maxFiles; truncation reported) → the tests reached, every changed test file itself, and name links with score >= minScore (default 0.7 in this mode; lower ones are dropped and counted in belowMinScore). Each test carries `why`. Per package it reads the nearest vitest/vite config lexically (include, exclude, root, test.projects; never executed — an unreadable value is named and the package dir is used) and emits one command that runs the package's own vitest binary, e.g. `cd packages/core && ./node_modules/.bin/vitest run <files>` — never a package manager, which can rewrite tracked config or create a store in the tree (node_modules must already be installed); tests no include admits are listed in `excluded` with the reason. A node:test file gets runner 'unknown' and a `node --test` hint. Nothing is executed.",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
@@ -1489,7 +1489,7 @@
         "openWorldHint": false,
         "readOnlyHint": true
       },
-      "description": "Task router: given a free-text intent (e.g. 'implement a feature like ConversationNote', 'rename X', 'what breaks if I change Y', 'which tests to run') returns the recommended MCP tool(s) + caveats, and resolves an optional seed to seedSymbols. Deterministic keyword classification (no LLM). Use first when unsure which tool to start with.",
+      "description": "Which tool should I use? Task router: given a free-text intent (e.g. 'implement a feature like ConversationNote', 'rename X', 'what breaks if I change Y', 'which tests to run') returns the recommended MCP tool(s) + caveats, and resolves an optional seed to seedSymbols. Deterministic keyword classification (no LLM). Use first when unsure which tool to start with.",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
@@ -1526,7 +1526,7 @@
         "openWorldHint": false,
         "readOnlyHint": true
       },
-      "description": "Unified docs tool. mode=search: full-text search across indexed documentation sections (requires query); mode=stale: find docs that mention changed symbols (requires symbolIds); mode=coverage: show which exported symbols are documented (requires filePath); mode=drift: CANDIDATES for doc staleness — docs naming an identifier the graph does not have, paired with the closest symbol name that does exist. Review them; a near miss is often a rename but can also be a sibling (callEdgesResolved vs callEdgesUnresolved). Naming-convention and plural variants are already filtered out. Tune with minSimilarity (default 0.75). mode=links: the doc-to-doc link graph — broken links, orphan documents and the most-linked hubs; mode=behind: documents whose last commit predates the last commit of the code they mention, from git, ordered by how far behind, with archived/superseded excluded (includeArchived opts them back in); mode=language: documents not yet normalized to English, by non-ASCII LETTER share per chunk (typography like em-dashes and arrows does not count) — both a retrieval guard and a progress meter for the normalization work; mode=section: read ONE section of a document (requires filePath + EXACTLY ONE of headingPrefix, headingContains, line). headingPrefix — a case-insensitive prefix of the heading text, inline markup ignored, an exact heading winning over longer ones; use it when you know the heading's start (a number like '3.7'). headingContains — a case-insensitive substring of the heading; use it when you know a word of the title, not its start. line — the innermost section containing line N of filePath; use it when you have a line from a search hit or citation. Returns the section from the file as it is on disk (current even when the index is behind) up to the next heading of the same or higher level, its subsections' headings, and other headings the prefix also matched; maxTokens (default 10000) cuts it at a line boundary and reports truncatedAtLine. Use this instead of reading a line range: a heading survives edits above it, a line number does not. No match is an error listing the nearest headings; mode=cites: the repo's own citations (patterns from .codebase-index/citations.json, found in markdown prose, code comments and, when the repo opts in with scan.codeStrings, string literals assigned to the named properties) — with target ('15 #737', 'adr/0021', or a file path) it resolves the cited row/heading/file and lists everything citing it, with the enclosing symbol for code; with filePath it lists that file's citations, each resolved (line = where the citation sits in that file; targetFile/targetLine/targetText = where it points). A repo without that file has no citations. mode=term: one canonical name (query, matched exactly) answered from the repo's registry doc (registryDoc in .codebase-index/citations.json): the table rows that DEFINE it (first cell is the name) with their section, the lines that only mention it, and the Zod shape keys that declare it (file:line, owning const, the registry section it matches); reads and writes come from find_field_accesses. Without query it is the reverse report: Zod shape keys in non-test files (snake_case, plus lower-case keys of a schema that has one) that the registry does not define — by a row's first cell, a backticked heading, or a backticked name nested in a row or in prose — a review queue (high = never named, medium = named bare only); termIgnore in citations.json skips names. mode=search also returns `codeComments` (code comments matching the query, with their enclosing symbol) unless includeCodeComments=false. Most modes return { repoId, mode, count, results }. Requires docs lane enabled. includeSymbols=true (mode=search only) additionally pads the result set with matching CODE symbols — off by default, because a docs search answering with symbols is rarely what was asked. mode=stale counts PROSE mentions only; includeCodeMentions=true also counts identifiers appearing inside fenced code samples. mode=stale lists rows naming a changed symbol for certain first (results, paged by limit), then ambiguousGroups: one entry per mention text whose candidates include a changed symbol among several equal ones — rows, sections, docs, candidateCount, listsSymbolIds, up to 3 samples, and registryTerm when the repo's registry doc defines that name — ordered by sections, then text; count = resolvedCount + ambiguousCount, and a group past the 100th is counted in ambiguousGroupsDropped, never dropped silently. expandAmbiguous=true returns every row flat instead, resolved first. mode=search matches headings, prose sections and code blocks by default — pass contentTypes to narrow. A doc mention binds to one symbol: real code is preferred over test code (test-path candidates are dropped when a non-test one exists), a superseded SQL definition (archive/, .down.sql, an older numbered migration) is dropped when the current definition of that name is also a candidate and wins on tier or migration number (a tie-break win drops nothing; a repo without numbered migrations is unaffected), then the best kind (class > interface > function > method > variable > other); a name still shared equally is reported as ambiguous with its candidate count (stale match:\"ambiguous\", coverage ambiguousMentionCount, drift ambiguousExcluded) — never a guess.",
+      "description": "Where is X documented: search, read and audit the indexed docs. mode=search: full-text search across indexed documentation sections (requires query); mode=stale: find docs that mention changed symbols (requires symbolIds); mode=coverage: show which exported symbols are documented (requires filePath); mode=drift: CANDIDATES for doc staleness — docs naming an identifier the graph does not have, paired with the closest symbol name that does exist. A near miss is often a rename, sometimes a sibling. Naming-convention and plural variants are already filtered out. Tune with minSimilarity (default 0.75). mode=links: the doc-to-doc link graph — broken links, orphan documents and the most-linked hubs; mode=behind: documents whose last commit predates the last commit of the code they mention, from git, ordered by how far behind, with archived/superseded excluded (includeArchived opts them back in); mode=language: documents not yet normalized to English, by non-ASCII LETTER share per chunk (typography like em-dashes and arrows does not count) — both a retrieval guard and a progress meter for the normalization work; mode=section: read ONE section of a document (requires filePath + EXACTLY ONE of headingPrefix, headingContains, line). headingPrefix when you know the heading's start (e.g. '3.7'; an exact heading wins over longer ones), headingContains when you know a word of the title (both case-insensitive, markup ignored), line when you have a line from a search hit or citation. Returns the section from the file as it is on disk (current even when the index is behind) up to the next heading of the same or higher level, its subsections' headings, and other headings the prefix also matched; maxTokens (default 10000) cuts it at a line boundary and reports truncatedAtLine. Prefer it to reading a line range: a heading survives edits above it. No match is an error listing the nearest headings; mode=cites: the repo's own citations (patterns from .codebase-index/citations.json, found in markdown prose, code comments and, when the repo opts in with scan.codeStrings, string literals assigned to the named properties) — with target ('15 #737', 'adr/0021', or a file path) it resolves the cited row/heading/file and lists everything citing it, with the enclosing symbol for code; with filePath it lists that file's citations, each resolved (line = where the citation sits in that file; targetFile/targetLine/targetText = where it points). A repo without that file has no citations. mode=term: one canonical name (query, matched exactly) answered from the repo's registry doc (registryDoc in .codebase-index/citations.json): the table rows that DEFINE it (first cell is the name) with their section, the lines that only mention it, and the Zod shape keys that declare it (file:line, owning const, the registry section it matches); reads and writes come from find_field_accesses. Without query it is the reverse report: Zod shape keys in non-test files (snake_case, plus lower-case keys of a schema that has one) that the registry does not define — by a row's first cell, a backticked heading, or a backticked name nested in a row or in prose — a review queue (high = never named, medium = named bare only); termIgnore in citations.json skips names. mode=search also returns `codeComments` (code comments matching the query, with their enclosing symbol) unless includeCodeComments=false. Most modes return { repoId, mode, count, results }. Requires docs lane enabled. includeSymbols=true (mode=search only) additionally pads the result set with matching CODE symbols — off by default, because a docs search answering with symbols is rarely what was asked. mode=stale counts PROSE mentions only; includeCodeMentions=true also counts identifiers appearing inside fenced code samples. mode=stale lists rows naming a changed symbol for certain first (results, paged by limit), then ambiguousGroups: one entry per mention text whose candidates include a changed symbol among several equal ones — rows, sections, docs, candidateCount, listsSymbolIds, up to 3 samples, and registryTerm when the repo's registry doc defines that name — ordered by sections, then text; count = resolvedCount + ambiguousCount, and a group past the 100th is counted in ambiguousGroupsDropped, never dropped silently. expandAmbiguous=true returns every row flat instead, resolved first. mode=search matches headings, prose sections and code blocks by default — pass contentTypes to narrow. A doc mention binds to one symbol: real code is preferred over test code (test-path candidates are dropped when a non-test one exists), a superseded SQL definition (archive/, .down.sql, an older numbered migration) is dropped when the current definition of that name is also a candidate and wins on tier or migration number (a tie-break win drops nothing; a repo without numbered migrations is unaffected), then the best kind (class > interface > function > method > variable > other); a name still shared equally is reported as ambiguous with its candidate count (stale match:\"ambiguous\", coverage ambiguousMentionCount, drift ambiguousExcluded) — never a guess.",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
@@ -2211,7 +2211,7 @@
         "openWorldHint": false,
         "readOnlyHint": true
       },
-      "description": "Map HTTP routes to handler methods. C# is read in full; JS/TS coverage is limited to direct app|router|fastify.VERB('/path', handler) registrations — see the empty-result hint for what is not read yet. Reads BOTH dialects: minimal-API registrations (MapGroup/MapGet/MapPost/MapPut/MapPatch/MapDelete, with the group prefix folded into an absolute routeTemplate) and attribute-routed controllers ([Route], [HttpGet], [HttpPost], ...). handlerName is the delegate at the registration site, so it stays correct when the handler is declared in another file of a partial class. Use to inspect API surface deterministically. excludeTests=true drops test-path results entirely.",
+      "description": "List HTTP routes / API endpoints and the handler method serving each. C# is read in full: minimal-API registrations (MapGroup/MapGet/MapPost/MapPut/MapPatch/MapDelete, the group prefix folded into an absolute routeTemplate) and attribute-routed controllers ([Route], [HttpGet], [HttpPost], ...). JS/TS only direct app|router|fastify.VERB('/path', handler) registrations — the empty-result hint says what is not read yet. handlerName is the delegate at the registration site, so it stays correct across partial-class files. excludeTests=true drops test-path results entirely.",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
@@ -2263,7 +2263,7 @@
         "openWorldHint": false,
         "readOnlyHint": true
       },
-      "description": "Search string-literal CONTENT (notification titles, error messages, log templates, user-facing text) across a repo's indexed code. Returns each literal with file, line, and enclosing symbol — use for 'what text does this repo emit' audits (notification catalogs, error-message inventories, i18n sweeps) instead of grep. Interpolated/template strings are indexed with {…} placeholders. excludeTests=true drops test-path results entirely.",
+      "description": "Find string-literal text in code — error messages, notification titles, log templates, user-facing text — with file, line and enclosing symbol. For 'what text does this repo emit' audits (notification catalogs, error-message inventories, i18n sweeps) instead of grep; any other text → search_regex. Interpolated/template strings are indexed with {…} placeholders. excludeTests=true drops test-path results entirely.",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
@@ -2414,7 +2414,7 @@
         "openWorldHint": false,
         "readOnlyHint": true
       },
-      "description": "Search symbols across all repos or a specific repo. strategy=name is strict name/signature matching; strategy=intent uses broader tokenized matching (multi-word natural-language queries work, e.g. 'send notification email'). ranked=true returns scored/ranked candidates (with qualifiedName 'EnclosingType.Member' for class members; enclosing-type names participate in intent matching; test files get a rank penalty) and honors strategy plus the kind/language/filePath filters. excludeTests=true drops test-path results entirely.",
+      "description": "Find where a symbol (class, function, method, property…) is defined, by name, across all repos or one repo. strategy=name is strict name/signature matching; strategy=intent uses broader tokenized matching (multi-word queries work, e.g. 'send notification email'). ranked=true returns scored candidates (qualifiedName 'EnclosingType.Member' for class members; enclosing-type names join intent matching; test files rank lower) and honors strategy plus the kind/language/filePath filters. A dotted Owner.member query ('FixStage.run', 'pkg.Cls.m') matches the member on its owner. A business phrase with no identifier → search_regex first; the code itself → get_symbol_source. excludeTests=true drops test-path results entirely.",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {
@@ -2478,7 +2478,7 @@
         "openWorldHint": false,
         "readOnlyHint": true
       },
-      "description": "BFS-trace the call graph starting from an entry symbol, following CALLS edges outbound up to maxDepth levels. Returns nodes and edges forming the execution sub-graph. Use to understand how a method propagates through the codebase. excludeTests=true drops test-path results entirely.",
+      "description": "Forward execution flow from an entry symbol: BFS over outbound CALLS edges up to maxDepth, returning the nodes and edges of the sub-graph — how a method propagates through the codebase. Inbound callers → get_change_context; a single path → get_call_chain. excludeTests=true drops test-path results entirely.",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {

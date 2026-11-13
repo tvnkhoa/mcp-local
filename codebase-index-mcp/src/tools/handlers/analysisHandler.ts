@@ -133,7 +133,7 @@ export function handleFindImplementations(
   const emptyHint =
     rows.length === 0
       ? {
-          hint: "no implementations found — IMPLEMENTS edges are emitted by the C# extractor only, so a TypeScript `class X implements Y` is not yet recorded; verify the interface name (see didYouMean) or that the repo contains C# implementations.",
+          hint: "no implementations found — IMPLEMENTS edges come from the C# extractor and from Python typing.Protocol classes only, so a TypeScript `class X implements Y` is not yet recorded; verify the interface name (see didYouMean) or that the repo contains C# or Python Protocol implementations.",
           didYouMean
         }
       : {};

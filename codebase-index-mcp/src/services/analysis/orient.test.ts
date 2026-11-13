@@ -139,9 +139,40 @@ test("the existing rules still win their own phrasings", () => {
     assert.equal(got.ruleId, ruleId, intent);
     assert.equal(got.tool, tool, intent);
   }
-  // "who calls X" without an endpoint signal matches no rule — unchanged (generic discovery).
-  assert.equal(classifyIntent("who calls fooBar").fallback, true);
+  // "who calls X" without an endpoint signal is the plain callers question (row #2, 13 Nov: it used to fall back).
+  assert.equal(firstTool("who calls fooBar").tool, "get_change_context");
   // The plain tests rule is unchanged; its first entry was already the working-tree mode.
   assert.equal(firstTool("which tests").args.forWorkingTreeDiff, true);
   assert.equal(firstTool("which doc describes the decision record").args.mode, "search");
+});
+
+/**
+ * Row #2 (13 Nov): the caller questions that used to fall back or land on a near-miss tool. The fixed
+ * probe list lives in the row's evidence; these are its orient half.
+ */
+test("caller questions route to the tool that answers them first", () => {
+  const cases: [string, string][] = [
+    ["who imports this file", "find_impact_files"],
+    ["importers dependents of a file", "find_impact_files"],
+    ["callers of a function", "get_change_context"],
+    ["where is this documented", "query_docs"],
+    ["read source code of a function", "get_symbol_source"],
+    ["who reads or writes this property", "find_field_accesses"],
+    ["list files in a folder", "get_folder_summary"],
+    ["classes implementing an interface", "find_implementations"],
+    ["call path between two methods", "get_call_chain"],
+    ["find error message text in code", "search_literals"],
+    ["progress of a running index job", "index_status"],
+    ["who last changed this method git blame", "get_symbol_blame"],
+    ["read one section of a markdown doc by heading", "query_docs"],
+    ["what does this file depend on", "get_file_summary"]
+  ];
+  for (const [intent, tool] of cases) assert.equal(firstTool(intent).tool, tool, intent);
+  assert.equal(firstTool("read one section of a markdown doc by heading").args.mode, "section");
+});
+
+test("row #2 review: the new rules do not hijack neighbouring phrasings", () => {
+  assert.equal(firstTool("which directory is fooBar in, where is it").tool, "search_symbols");
+  assert.equal(firstTool("did the last index run fail, is it stale").tool, "health_check");
+  assert.notEqual(firstTool("which section of the docs explains retries").args.mode, "section");
 });
