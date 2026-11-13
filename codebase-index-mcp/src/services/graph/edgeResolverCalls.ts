@@ -650,6 +650,8 @@ const MAX_INTERFACE_DISPATCH_FANOUT = 10;
  * wins), so the result does not depend on which rows a later dedup pass looks at.
  */
 export function rebuildInterfaceDispatchEdges(db: Database.Database, repoId: string): number {
+  // PY-5: Python Protocol implementers first — the fan-out below reads IMPLEMENTS.
+  rebuildPythonProtocolImplements(db, repoId);
   db.prepare(`delete from edges where repo_id = ? and type = 'CALLS' and reason = 'interface-dispatch'`).run(repoId);
   const calls = db
     .prepare(
@@ -689,6 +691,149 @@ export function rebuildInterfaceDispatchEdges(db: Database.Database, repoId: str
         const impl = (candidateMap.get(call.name) ?? []).find((c) => c.filePath === filePath && c.kind === "method");
         if (!impl || impl.symbolId === call.methodId) continue;
         count += insert.run(repoId, call.fromId, impl.symbolId, repoId, call.fromId, impl.symbolId).changes;
+      }
+    }
+  });
+  tx();
+  return count;
+}
+
+/** PY-5: the two reasons `rebuildPythonProtocolImplements` writes; it owns every IMPLEMENTS edge carrying one. */
+export const PROTOCOL_EXPLICIT_REASON = "base_list protocol";
+export const PROTOCOL_STRUCTURAL_REASON = "structural protocol";
+/** Not part of a Protocol's structural contract: every class has them. */
+const PROTOCOL_IGNORED_MEMBERS = new Set(["__init__", "__new__", "__init_subclass__", "__class_getitem__", "__post_init__"]);
+
+/**
+ * PY-5 (G1): rebuild every Python Protocol IMPLEMENTS edge of the repo from scratch — a pure function of the
+ * Python class / interface / method symbols and their EXTENDS rows, so a scoped run lands where a full run does.
+ *
+ * A Python `Protocol` is stored as kind `interface` (the extractor). PEP 544 typing is structural, so:
+ *   - a class listing a Protocol (or a Protocol's sub-Protocol) among its bases implements it — 0.95, explicit;
+ *   - any other class whose methods, its own plus those up its in-repo base chain, cover every member the
+ *     Protocol declares (its own plus its parent Protocols') implements it — 0.8, structural. A Protocol with
+ *     no method members (attributes only) has no structural implementers: it would match every class.
+ * Base names are bound with the call lane's picker (same file, imported file, tie-break), from the
+ * `base:<Name>` token or the resolved target's name, so the result does not depend on EXTENDS resolution state.
+ */
+export function rebuildPythonProtocolImplements(db: Database.Database, repoId: string): number {
+  db.prepare(`delete from edges where repo_id = ? and type = 'IMPLEMENTS' and reason in (?, ?)`).run(
+    repoId,
+    PROTOCOL_EXPLICIT_REASON,
+    PROTOCOL_STRUCTURAL_REASON
+  );
+  type TypeRow = { symbolId: string; name: string; kind: string; filePath: string };
+  const types = db
+    .prepare(
+      `select symbol_id as symbolId, name, kind, file_path as filePath from symbols
+       where repo_id = ? and kind in ('class', 'interface') and (file_path like '%.py' or file_path like '%.pyi')
+       order by name, file_path, symbol_id`
+    )
+    .all(repoId) as TypeRow[];
+  if (!types.some((t) => t.kind === "interface")) return 0;
+
+  const byName = new Map<string, TypeRow[]>();
+  for (const t of types) {
+    const list = byName.get(t.name);
+    if (list) list.push(t);
+    else byName.set(t.name, [t]);
+  }
+  const byId = new Map(types.map((t) => [t.symbolId, t]));
+
+  const methodsByOwner = new Map<string, Set<string>>();
+  for (const m of db
+    .prepare(
+      `select name, parent_symbol_id as ownerId from symbols
+       where repo_id = ? and kind = 'method' and parent_symbol_id is not null
+         and (file_path like '%.py' or file_path like '%.pyi')
+       order by parent_symbol_id, name`
+    )
+    .all(repoId) as { name: string; ownerId: string }[]) {
+    if (!byId.has(m.ownerId)) continue;
+    const set = methodsByOwner.get(m.ownerId);
+    if (set) set.add(m.name);
+    else methodsByOwner.set(m.ownerId, new Set([m.name]));
+  }
+
+  const importedFilesByFile = buildImportedFilesByFile(db, repoId);
+  const basesById = new Map<string, string[]>();
+  for (const r of db
+    .prepare(
+      `select e.from_id as fromId, e.to_id as toId, t.name as toName, min(e.rowid) as pos
+       from edges e
+       join symbols s on s.repo_id = e.repo_id and s.symbol_id = e.from_id
+       left join symbols t on t.repo_id = e.repo_id and t.symbol_id = e.to_id
+       where e.repo_id = ? and e.type = 'EXTENDS' and s.kind in ('class', 'interface')
+         and (s.file_path like '%.py' or s.file_path like '%.pyi')
+       group by e.from_id, e.to_id
+       order by e.from_id, pos`
+    )
+    .all(repoId) as { fromId: string; toId: string; toName: string | null }[]) {
+    const from = byId.get(r.fromId);
+    const name = r.toId.startsWith("base:") ? r.toId.slice(5) : r.toName;
+    if (!from || !name) continue;
+    const candidates = (byName.get(name) ?? []).filter((c) => c.symbolId !== r.fromId);
+    const base = pickBestNamedCandidate(candidates, from.filePath, ["interface", "class"], importedFilesByFile.get(normalizeFilePath(from.filePath)));
+    if (!base) continue;
+    const list = basesById.get(r.fromId);
+    if (!list) basesById.set(r.fromId, [base.symbolId]);
+    else if (!list.includes(base.symbolId)) list.push(base.symbolId);
+  }
+
+  /** The type itself and every in-repo type up its base chain, breadth-first, capped like the call lane's MRO walk. */
+  const ancestry = (id: string): string[] => {
+    const out: string[] = [];
+    const queue = [id];
+    while (queue.length > 0 && out.length < MAX_PYTHON_MRO_CLASSES) {
+      const next = queue.shift()!;
+      if (out.includes(next)) continue;
+      out.push(next);
+      queue.push(...(basesById.get(next) ?? []));
+    }
+    return out;
+  };
+
+  const protocols = types.filter((t) => t.kind === "interface");
+  const required = new Map<string, string[]>();
+  for (const p of protocols) {
+    const names = new Set<string>();
+    for (const id of ancestry(p.symbolId)) {
+      if (byId.get(id)?.kind !== "interface") continue;
+      for (const n of methodsByOwner.get(id) ?? []) if (!PROTOCOL_IGNORED_MEMBERS.has(n)) names.add(n);
+    }
+    required.set(p.symbolId, [...names].sort());
+  }
+
+  const insert = db.prepare(
+    `insert into edges (repo_id, from_id, to_id, type, confidence, reason)
+     select ?, ?, ?, 'IMPLEMENTS', ?, ?
+     where not exists (select 1 from edges where repo_id = ? and from_id = ? and to_id = ? and type = 'IMPLEMENTS')`
+  );
+  let count = 0;
+  const tx = immediateTransaction(db, () => {
+    for (const cls of types) {
+      if (cls.kind !== "class") continue;
+      const chain = ancestry(cls.symbolId);
+      const explicit = new Set(chain.filter((id) => byId.get(id)?.kind === "interface"));
+      // A Protocol listed as a base also implements the Protocols it extends.
+      for (const id of [...explicit]) for (const up of ancestry(id)) if (byId.get(up)?.kind === "interface") explicit.add(up);
+      const available = new Set<string>();
+      for (const id of chain) for (const n of methodsByOwner.get(id) ?? []) available.add(n);
+      for (const p of protocols) {
+        let reason: string | null = null;
+        let confidence = 0;
+        if (explicit.has(p.symbolId)) {
+          reason = PROTOCOL_EXPLICIT_REASON;
+          confidence = 0.95;
+        } else {
+          const members = required.get(p.symbolId) ?? [];
+          if (members.length > 0 && members.every((n) => available.has(n))) {
+            reason = PROTOCOL_STRUCTURAL_REASON;
+            confidence = 0.8;
+          }
+        }
+        if (!reason) continue;
+        count += insert.run(repoId, cls.symbolId, p.symbolId, confidence, reason, repoId, cls.symbolId, p.symbolId).changes;
       }
     }
   });

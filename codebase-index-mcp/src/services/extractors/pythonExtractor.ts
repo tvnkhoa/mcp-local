@@ -7,7 +7,7 @@
  * 0 call edges and 18 import edges, most of them accidental directory hits.
  *
  * What it emits, all through `makeSymbolId` so an edge's `fromId` is the id the symbol was stored under:
- *   - `class` (with `parentSymbolId` for a nested class), `method` for a def directly in a class body
+ *   - `class` (with `parentSymbolId` for a nested class; a `Protocol` subclass is kind `interface`, PY-5), `method` for a def directly in a class body
  *     — decorated or not (`@staticmethod`, `@classmethod`, `@property`, pydantic validators) — with
  *     `parentSymbolId` = its class, and `function` for every other def. The row is the `def` / `class`
  *     line, not the decorator's.
@@ -87,14 +87,15 @@ function collectDefinitions(
       const name = def.childForFieldName("name")?.text;
       const body = def.childForFieldName("body");
       if (!name) continue;
-      const symbolId = makeSymbolId(input, "class", name, def.startPosition.row);
+      const kind = classKindOf(def);
+      const symbolId = makeSymbolId(input, kind, name, def.startPosition.row);
       if (!inFunction && !ownerClassId) localClasses.add(name);
       symbols.push({
         repoId: input.repoId,
         symbolId,
         filePath: input.filePath,
         name,
-        kind: "class",
+        kind,
         line: def.startPosition.row + 1,
         endLine: def.endPosition.row + 1,
         signature: headerText(input.source, def, body),
@@ -162,6 +163,16 @@ function headerText(source: string, def: Parser.SyntaxNode, body: Parser.SyntaxN
   const end = body ? body.startIndex : def.endIndex;
   const raw = source.slice(def.startIndex, end).replace(/\s+/g, " ").trim().replace(/:$/, "").trim();
   return raw.length <= MAX_SIGNATURE ? raw : `${raw.slice(0, MAX_SIGNATURE)}...`;
+}
+
+/**
+ * PY-5: a class that lists `Protocol` among its bases (`typing.Protocol`, `typing_extensions.Protocol`,
+ * `Protocol[T]`) is a structural interface, stored as kind `interface` so find_implementations, the
+ * interface-dispatch fan-out and the interface sibling lookup treat it as one. A class that only extends
+ * another Protocol is NOT a Protocol (PEP 544): it implements it.
+ */
+function classKindOf(def: Parser.SyntaxNode): "class" | "interface" {
+  return classBaseNames(def).includes("Protocol") ? "interface" : "class";
 }
 
 /** The plain name each positional base names; keyword arguments (`metaclass=`) are not bases. */
@@ -568,7 +579,7 @@ function enclosingSymbolId(node: Parser.SyntaxNode, input: ExtractInput, registe
     if (current.type === "function_definition" || current.type === "class_definition") {
       const name = current.childForFieldName("name")?.text;
       if (name) {
-        const kind = current.type === "class_definition" ? "class" : isMethodDefinition(current) ? "method" : "function";
+        const kind = current.type === "class_definition" ? classKindOf(current) : isMethodDefinition(current) ? "method" : "function";
         const id = makeSymbolId(input, kind, name, current.startPosition.row);
         if (registered.has(id)) return id;
       }
