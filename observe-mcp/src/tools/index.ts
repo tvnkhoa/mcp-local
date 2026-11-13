@@ -140,7 +140,7 @@ export function buildTools(limits: ObserveLimits, clients: ClientManager): reado
   const searchLogs = defineTool({
     name: "search_logs",
     description:
-      "Find log lines: errors or a message in service X over the last hour (default) or any time window, optionally filtered by service, level, sourceContext and free-text contains. Newest first. Counts per level/service: log_stats; one request: trace_logs; CI build logs: bitbucket-mcp get_pipeline_step_log.",
+      "Find log lines: errors or a message in service X over the last hour (default) or a chosen time window, optionally filtered by service, level, sourceContext and free-text contains. Newest first. Counts per level/service: log_stats; one request: trace_logs; CI build logs: bitbucket-mcp get_pipeline_step_log.",
     input: z
       .object({
         service: z.string().min(1).max(256).optional(),
