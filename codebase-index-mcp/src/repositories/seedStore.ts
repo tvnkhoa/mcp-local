@@ -6,6 +6,7 @@
  * are filled for the child's new rowids only (never an FTS `'rebuild'`, which re-reads every repo), the
  * vectors are recomputed for the child, cross_repo_deps is left to the next full run, and one synthetic
  * `seed` run row, copied from the parent's latest ok run, is the base the git-scoped incremental diffs from.
+ * A parent whose rows mix INDEX_VERSIONs is refused (MCP-ISSUE-130 finding 2, `parentFullBaseVersion`); the job runs full.
  *
  * Interface contract: ~/.claude/handover/briefs/2026-11-04-mcp-local-ix9-parallel.md (changes only via the leader).
  */
@@ -15,6 +16,7 @@ import { randomUUID } from "node:crypto";
 import type Database from "better-sqlite3";
 
 import type { GraphStore } from "./graphStore.js";
+import { getLatestFullRunVersion, listRecentWorkRuns } from "./runStore.js";
 import { ftsForgetRepo } from "./scopedRunStore.js";
 import { immediateTransaction } from "./sqliteTx.js";
 import { rebuildVectorIndexForRepo } from "./vectorStore.js";
@@ -165,6 +167,17 @@ export function seedBaseOf(db: Database.Database, parentRepoId: string): SeedBas
     if (refused) return { ok: false, reason: refused };
   }
   if (!base.commit_sha) return { ok: false, reason: "the last complete run recorded no commit" };
+  // MCP-ISSUE-130 finding 2: the base may be a newer-version incremental over an older full build (wec.aria run 339b6b3a).
+  // Its version on the seed row hides the older rows from the child's escalation; the full build's version would hide the
+  // newer rows from a newer-build refusal. A mixed parent is not vouched for, so the job indexes the child full.
+  const builtBy = parentFullBaseVersion(db, parentRepoId);
+  const baseVersion = typeof base.index_version === "string" ? base.index_version : null;
+  if (builtBy !== baseVersion) {
+    return {
+      ok: false,
+      reason: `its rows mix index versions (fully built by ${builtBy ?? "no full run on record"}, last complete run by ${baseVersion ?? "an unrecorded INDEX_VERSION"}); a seed would copy the mix`
+    };
+  }
   return { ok: true, run: base, commitSha: String(base.commit_sha), carried };
 }
 
@@ -172,6 +185,24 @@ export function seedBaseOf(db: Database.Database, parentRepoId: string): SeedBas
 export function seedBaseRunSha(db: Database.Database, parentRepoId: string): string | null {
   const base = seedBaseOf(db, parentRepoId);
   return base.ok ? base.commitSha : null;
+}
+
+/**
+ * `GIT_SCOPE_RUN_LOOKBACK` in `services/indexing/runPolicy.ts`, mirrored so this repository module does not import the
+ * indexing pipeline; `seedStore.test.ts` asserts the two agree.
+ */
+export const FULL_BASE_LOOKBACK = 50;
+
+/**
+ * MCP-ISSUE-130 open item (2): the INDEX_VERSION that built the parent's rows, by the rule `versionEscalationFor`
+ * applies — the newest ok `full` or `seed` run among the recent work runs, else the latest ok full run. The seed is
+ * refused when it differs from the base run's version: the base may be an incremental run stamped with a newer version
+ * over an older full build (wec.aria run 339b6b3a). Null when the parent has no full build on record.
+ */
+export function parentFullBaseVersion(db: Database.Database, parentRepoId: string): string | null {
+  const recent = listRecentWorkRuns(db, parentRepoId, FULL_BASE_LOOKBACK);
+  const newest = recent.find((r) => r.status === "ok" && (r.mode === "full" || r.mode === "seed"));
+  return newest ? newest.indexVersion : getLatestFullRunVersion(db, parentRepoId);
 }
 
 /** The seed row's tree key: the base's own key with the carried dirty paths as its files (null when neither exists). */

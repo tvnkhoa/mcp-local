@@ -335,7 +335,8 @@
             "shared",
             "tool-schema"
           ]
-        }
+        },
+        "note": "Boots every server from dist: in a fresh worktree it fails 'dist not found' unless build:servers ran first (shared changes run it above; a tool-schema-only change must run it before this)."
       },
       {
         "id": "generate",
@@ -455,6 +456,12 @@
       "when": "adds:tool-schema",
       "add_paths": [
         "contracts/*.json"
+      ]
+    },
+    {
+      "when": "adds:harness",
+      "add_paths": [
+        "codebase-index-mcp/scripts/test-map.json"
       ]
     }
   ],

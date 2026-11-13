@@ -328,6 +328,7 @@ Gate: 4/4 servers build + typecheck, 36/36 harnesses (63 assertions in the 049 h
 - [MCP-ISSUE-128 — Python lane gaps G1-G4 after the tree-sitter lane (Protocols, conftest fixtures, star imports, untyped receivers, qualified search)](issues/MCP-ISSUE-128.md)
 - [MCP-ISSUE-129 — tool descriptions and `orient` routed plain caller questions to a near-miss tool or to the fallback](issues/MCP-ISSUE-129.md)
 - [MCP-ISSUE-130 — an INDEX_VERSION change ran scoped (incremental/dirty) runs that kept the older extraction; the gate said `refreshing` with no run](issues/MCP-ISSUE-130.md)
+- [MCP-ISSUE-131 — `query_docs` mode `term` blocked the server thread for seconds, and waited out the 5 s budget for usages it could not have; `index_status` paid for both](issues/MCP-ISSUE-131.md)
 - [Confirmed fixed — 2026-08-05 re-verification of the 042–051 wave](issues/confirmed-fixed-2026-08-05-re-verification-of-the-042-051-wave.md)
 - [MCP-ISSUE-101 follow-ups (row 5: F2–F4)](issues/mcp-issue-101-follow-ups-row-5-f2-f4.md)
 

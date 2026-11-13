@@ -81,7 +81,8 @@ Per change, run only the narrow targets that cover it: `test:unit`, the touched 
 `test:servers`.
 
 `verify:all` is **credential-free**; `contracts:check` boots all six servers over a real stdio
-handshake with placeholder env, which catches a module that compiles but cannot load. CI
+handshake with placeholder env, which catches a module that compiles but cannot load. It runs from
+`dist/`, so in a fresh worktree run `npm run build:servers` first or it fails "dist not found". CI
 (`.github/workflows/ci.yml`, Windows + Node 22) adds `install:servers` and `benchmark:plan:check` and
 drops `test:scripts` — `docs/development/ci.md`.
 
