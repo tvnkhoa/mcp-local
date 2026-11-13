@@ -21,7 +21,7 @@ import {
   stripGenerics,
 } from "../../repositories/vectorStore.js";
 import { buildNamedCandidateMap, pickBestNamedCandidate } from "./edgeResolverShared.js";
-import { buildImportedFilesByFile, isPythonFile, normalizeFilePath } from "./moduleResolution.js";
+import { buildImportedFilesByFile, isPythonFile, normalizeFilePath, pythonImportedFilesForName } from "./moduleResolution.js";
 import { immediateTransaction } from "../../repositories/sqliteTx.js";
 
 /**
@@ -252,7 +252,7 @@ function buildPythonBases(
     const name = r.toId.startsWith("base:") ? r.toId.slice(5) : r.toName;
     if (!name) continue;
     const classes = [...pythonLookupFor(candidateMap).classes(name), ...(protocolsByName.get(name) ?? [])].filter((c) => c.symbolId !== r.classId);
-    const base = pickBestNamedCandidate(classes, r.classFile, ["class", "interface"], importedFilesByFile.get(normalizeFilePath(r.classFile)));
+    const base = pickBestNamedCandidate(classes, r.classFile, ["class", "interface"], pythonImportedFilesForName(importedFilesByFile, normalizeFilePath(r.classFile), name));
     if (!base) continue;
     const list = bases.get(r.classId);
     if (!list) bases.set(r.classId, [base.symbolId]);
@@ -466,7 +466,11 @@ export function resolveCallEdgesBatch(
     // is a safe guess; a multi-candidate one is a coin flip that must say so.
     const directCandidates = candidateMap.get(calleeName) ?? [];
     let nameAmbiguous = directCandidates.length > 1;
-    const importedFiles = ctx.importedFilesByFile.get(normalizeFilePath(row.fromFile));
+    // PY-8b: a Python file's star-imported scope is narrowed to the modules that export the name it binds —
+    // the bare callee, or the owner of `Owner.member`.
+    const importedFiles = isPythonFile(row.fromFile)
+      ? pythonImportedFilesForName(ctx.importedFilesByFile, normalizeFilePath(row.fromFile), calleeName.split(".")[0] ?? calleeName)
+      : ctx.importedFilesByFile.get(normalizeFilePath(row.fromFile));
     let match = pickBestNamedCandidate(
       directCandidates,
       row.fromFile,

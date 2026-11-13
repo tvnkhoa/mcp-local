@@ -57,3 +57,9 @@ export const PYTHON_STDLIB_MODULES = new Set<string>([
   "concurrent", "statistics", "operator", "types", "traceback", "unicodedata", "difflib", "html",
   "urllib", "http", "socket", "signal", "platform", "importlib", "pytest", "unittest", "mock"
 ]);
+
+/**
+ * PY-8b: a Python module symbol's signature when the module assigns `__all__`: this prefix, then the listed
+ * names comma-joined, or `?` when the assignment is not a literal list (export set unknown, nothing filtered).
+ */
+export const PYTHON_DUNDER_ALL_PREFIX = "__all__:";

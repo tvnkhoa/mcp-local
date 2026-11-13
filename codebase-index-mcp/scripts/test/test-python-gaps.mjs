@@ -129,7 +129,22 @@ try {
     "PY-8 normalize() via the star import → helpers/impl.py (re-exported by api.py), not the alt.py decoy", useCalls());
   assert(useCalls().some((e) => e.toName === "check" && e.toParent === "Formatter" && e.toFile === IMPL),
     "PY-8 Formatter.check() on a star-imported class → impl.py Formatter.check", useCalls());
-  const useKey = (list) => list.filter((e) => e.type === "CALLS" && e.fromName === "use" && e.fromFile === CONSUMER).map((e) => `${e.toName}@${e.toFile}`).sort();
+  // ── PY-8b: `__all__` ──
+  assert(symbols.find((s) => s.file === API && s.kind === "module")?.id && (await sql(
+    `select signature from symbols where repo_id = :repoId and kind = 'module' and replace(file_path, char(92), '/') = '${API}'`
+  ))[0]?.signature === "__all__:normalize,Formatter", "PY-8b api.py's __all__ is recorded on its module symbol");
+  const PLAIN = "src/flow/helpers/plain.py", ALT = "src/flow/alt.py";
+  const plainCalls = edges.filter((e) => e.type === "CALLS" && e.fromName === "use_plain" && e.fromFile === "src/flow/consumer_plain.py");
+  const plainTo = (name) => plainCalls.filter((e) => e.toName === name).map((e) => e.toFile);
+  assert(plainTo("shown").includes(PLAIN), "PY-8b no __all__: a public name (shown) binds through the star import", plainCalls);
+  assert(JSON.stringify(plainTo("slugify")) === JSON.stringify([ALT]),
+    "PY-8b slugify, imported by api.py but not in its __all__, does not bind impl.py", plainCalls);
+  assert(JSON.stringify(plainTo("_hidden")) === JSON.stringify([ALT]),
+    "PY-8b no __all__: a private name (_hidden) is not star-exported by plain.py", plainCalls);
+  assert(JSON.stringify(plainTo("_private")) === JSON.stringify([ALT]),
+    "PY-8b no __all__: a private name plain.py imports (_private) is not re-exported", plainCalls);
+  const useKey = (list) => list.filter((e) => e.type === "CALLS" && ((e.fromName === "use" && e.fromFile === CONSUMER) || e.fromName === "use_plain"))
+    .map((e) => `${e.fromName}:${e.toName}@${e.toFile}`).sort();
 
   // ── PY-6 ──
   const ENGINE = "src/flow/engine.py", STAGING = "src/flow/staging.py", FIX = "src/flow/steps/fix_step.py", DRAFT = "src/flow/steps/draft_step.py";
@@ -199,7 +214,7 @@ try {
   await index("incremental");
   const useAfterAlt = useKey(await loadEdges());
   assert(JSON.stringify(useAfterConsumer) === JSON.stringify(useBefore) && JSON.stringify(useAfterAlt) === JSON.stringify(useBefore),
-    "PY-8 incremental runs land on the full run's star-import targets", { useBefore, useAfterConsumer, useAfterAlt });
+    "PY-8 / PY-8b incremental runs land on the full run's star-import targets (__all__ filter included)", { useBefore, useAfterConsumer, useAfterAlt });
 } finally {
   await Promise.race([client.close().catch(() => {}), new Promise((r) => setTimeout(r, 3000))]);
 }

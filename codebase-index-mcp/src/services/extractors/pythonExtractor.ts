@@ -30,7 +30,7 @@ import type { EdgeRecord, RouteRecord, SymbolRecord } from "../../types/index.js
 import type { ExtractInput } from "./extractorTypes.js";
 
 import { extractFirstStringLiteral, isSameNode, makeSymbolId } from "./extractorUtils.js";
-import { PYTHON_BUILTIN_FUNCTIONS, PYTHON_BUILTIN_METHODS, PYTHON_STDLIB_MODULES } from "./pythonNoise.js";
+import { PYTHON_BUILTIN_FUNCTIONS, PYTHON_BUILTIN_METHODS, PYTHON_DUNDER_ALL_PREFIX, PYTHON_STDLIB_MODULES } from "./pythonNoise.js";
 
 type ImportedName = { original: string; fromModule: string };
 
@@ -58,6 +58,12 @@ export function extractPythonImpl(
   moduleSymbolId: string
 ): void {
   const scope = extractImports(input, root, edges, moduleSymbolId);
+  // PY-8b: the module's `__all__` rides on its module symbol's signature, for the star-import filter.
+  const exported = readDunderAll(root);
+  if (exported !== undefined) {
+    const moduleSymbol = symbols.find((sym) => sym.symbolId === moduleSymbolId);
+    if (moduleSymbol) moduleSymbol.signature = `${PYTHON_DUNDER_ALL_PREFIX}${exported ?? "?"}`;
+  }
   const moduleFunctions = new Set<string>();
   const localClasses = new Set<string>();
   collectDefinitions(input, root, symbols, edges, routes, moduleSymbolId, null, false, moduleFunctions, localClasses);
@@ -323,6 +329,41 @@ function collectFixtureUses(
     if (!pname || PYTEST_BUILTIN_FIXTURES.has(pname)) continue;
     edges.push({ repoId: input.repoId, fromId: symbolId, toId: `callee:${pname}`, type: "CALLS" });
   }
+}
+
+// ── __all__ (PY-8b) ─────────────────────────────────────────────────────────────────────────
+
+/**
+ * PY-8b: a module's `__all__`, from its module-level `__all__ = [...]` / `(...)` and `__all__ += [...]`
+ * statements, comma-joined. `undefined`: the module never assigns `__all__` (a star import binds its public
+ * names). `null`: it assigns something other than a literal list of names (`a.__all__ + [...]`), so what it
+ * exports is unknown and nothing is filtered.
+ */
+function readDunderAll(root: Parser.SyntaxNode): string | null | undefined {
+  let names: string[] | undefined;
+  for (const statement of root.namedChildren) {
+    if (statement.type !== "expression_statement") continue;
+    const assign = statement.namedChildren[0];
+    if (assign?.type !== "assignment" && assign?.type !== "augmented_assignment") continue;
+    if (assign.childForFieldName("left")?.text !== "__all__") continue;
+    const right = assign.childForFieldName("right");
+    if (!right || (right.type !== "list" && right.type !== "tuple")) return null;
+    const listed: string[] = [];
+    for (const item of right.namedChildren) {
+      if (item.type === "comment") continue;
+      const value = item.type === "string" ? stringLiteralValue(item.text) : undefined;
+      if (value === undefined || !/^[A-Za-z_][A-Za-z0-9_]*$/.test(value)) return null;
+      listed.push(value);
+    }
+    names = assign.type === "augmented_assignment" ? [...(names ?? []), ...listed] : listed;
+  }
+  return names === undefined ? undefined : [...new Set(names)].join(",");
+}
+
+/** `"x"` / `'x'` / `u"x"` → `x`; an f-string or a byte string is not a name. */
+function stringLiteralValue(text: string): string | undefined {
+  const match = /^[rRuU]?("""|'''|"|')([\s\S]*)\1$/.exec(text);
+  return match ? match[2] : undefined;
 }
 
 // ── Imports ─────────────────────────────────────────────────────────────────────────────────

@@ -12,6 +12,8 @@ import path from "node:path";
 
 import type Database from "better-sqlite3";
 
+import { PYTHON_DUNDER_ALL_PREFIX } from "../extractors/pythonNoise.js";
+
 /** Forward slashes everywhere, matching the response convention the rest of the server holds to. */
 export function normalizeFilePath(filePath: string): string {
   return filePath.replace(/\\/g, "/");
@@ -418,6 +420,13 @@ export function buildImportedFilesByFile(
     if (set) set.add(target);
     else starTargets.set(fromFile, new Set([target]));
   };
+  /** PY-8b: per Python file, the modules it imports other than by `*` — those never go through the name filter. */
+  const plainTargets = new Map<string, Set<string>>();
+  const addPlain = (fromFile: string, target: string): void => {
+    const set = plainTargets.get(fromFile);
+    if (set) set.add(target);
+    else plainTargets.set(fromFile, new Set([target]));
+  };
 
   for (const row of rows) {
     const specifier = row.toId.slice("import:".length);
@@ -433,6 +442,7 @@ export function buildImportedFilesByFile(
     }
     if (!target) continue;
     if (python && specifier.endsWith("*")) addStar(fromFile, target);
+    else if (python) addPlain(fromFile, target);
 
     let set = byFile.get(fromFile);
     if (!set) {
@@ -459,6 +469,7 @@ export function buildImportedFilesByFile(
   for (const row of resolvedPythonImports) {
     const fromFile = normalizeFilePath(row.fromFile);
     if (row.reason === PYTHON_STAR_IMPORT_REASON) addStar(fromFile, normalizeFilePath(row.toFile));
+    else addPlain(fromFile, normalizeFilePath(row.toFile));
     let set = byFile.get(fromFile);
     if (!set) {
       set = new Set<string>();
@@ -484,5 +495,87 @@ export function buildImportedFilesByFile(
     }
   }
 
+  // PY-8b: a file in scope ONLY through `from x import *` (x itself, or what x imports) binds a name only when
+  // x exports it — x's `__all__`, else its public names. Record which star modules brought each such file in;
+  // `pythonImportedFilesForName` applies the filter per called name.
+  const starOnly = new Map<string, Map<string, Set<string>>>();
+  for (const [fromFile, stars] of starTargets) {
+    const plain = plainTargets.get(fromFile) ?? new Set<string>();
+    // What a plain import puts in scope, the `__init__` hop included, is never filtered.
+    const viaPlain = new Set(plain);
+    for (const target of plain) {
+      if (!/(^|\/)__init__\.pyi?$/.test(target)) continue;
+      for (const reExported of direct.get(target) ?? []) viaPlain.add(reExported);
+    }
+    const perFile = new Map<string, Set<string>>();
+    const note = (file: string, exporter: string): void => {
+      if (file === fromFile || viaPlain.has(file)) return;
+      const set = perFile.get(file);
+      if (set) set.add(exporter);
+      else perFile.set(file, new Set([exporter]));
+    };
+    for (const star of stars) {
+      note(star, star);
+      for (const reExported of direct.get(star) ?? []) note(reExported, star);
+    }
+    if (perFile.size > 0) starOnly.set(fromFile, perFile);
+  }
+  if (starOnly.size > 0) {
+    const exportsByModule = new Map<string, ReadonlySet<string> | null>();
+    for (const row of db
+      .prepare(`select file_path as filePath, signature from symbols where repo_id = ? and kind = 'module' and signature like ?`)
+      .all(repoId, `${PYTHON_DUNDER_ALL_PREFIX}%`) as { filePath: string; signature: string }[]) {
+      const listed = row.signature.slice(PYTHON_DUNDER_ALL_PREFIX.length);
+      exportsByModule.set(normalizeFilePath(row.filePath), listed === "?" ? null : new Set(listed.split(",").filter(Boolean)));
+    }
+    pythonStarScopes.set(byFile, { starOnly, exportsByModule, cache: new Map() });
+  }
+
   return byFile;
+}
+
+type PythonStarScope = {
+  /** importer → file in its scope only by star import → the star-imported modules that brought it in. */
+  starOnly: Map<string, Map<string, Set<string>>>;
+  /** module → its `__all__` (null: assigned but not a literal list). Absent: no `__all__`, public names. */
+  exportsByModule: Map<string, ReadonlySet<string> | null>;
+  cache: Map<string, ReadonlySet<string>>;
+};
+
+const pythonStarScopes = new WeakMap<Map<string, Set<string>>, PythonStarScope>();
+
+/** Whether `from module import *` binds `name`. */
+function starExports(scope: PythonStarScope, module: string, name: string): boolean {
+  const listed = scope.exportsByModule.get(module);
+  if (listed === null) return true;
+  return listed ? listed.has(name) : !name.startsWith("_");
+}
+
+/**
+ * PY-8b: `fromFile`'s import scope (from `buildImportedFilesByFile`) for resolving the name `name` — a bare
+ * callee, or the owner of `Owner.member`. A file that is in scope only through star imports stays in only
+ * when one of those star modules exports `name`. Any other file — or one with no star import — gets its
+ * scope unchanged.
+ */
+export function pythonImportedFilesForName(
+  byFile: Map<string, Set<string>>,
+  fromFile: string,
+  name: string
+): ReadonlySet<string> | undefined {
+  const all = byFile.get(fromFile);
+  const scope = pythonStarScopes.get(byFile);
+  const starOnly = scope?.starOnly.get(fromFile);
+  if (!all || !scope || !starOnly) return all;
+  const key = `${fromFile}\u0000${name}`;
+  const cached = scope.cache.get(key);
+  if (cached) return cached;
+  let filtered: Set<string> | undefined;
+  for (const [file, exporters] of starOnly) {
+    if ([...exporters].some((module) => starExports(scope, module, name))) continue;
+    filtered ??= new Set(all);
+    filtered.delete(file);
+  }
+  const result = filtered ?? all;
+  scope.cache.set(key, result);
+  return result;
 }
