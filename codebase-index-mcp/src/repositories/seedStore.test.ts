@@ -8,7 +8,9 @@ import test from "node:test";
 import Database from "better-sqlite3";
 
 import { GraphStore } from "./graphStore.js";
-import { SEED_TABLES, SeedError, seedFromParent, unhandledSeedTables } from "./seedStore.js";
+import { FULL_BASE_LOOKBACK, SEED_TABLES, SeedError, seedFromParent, unhandledSeedTables } from "./seedStore.js";
+import { GIT_SCOPE_RUN_LOOKBACK, versionEscalationFor } from "../services/indexing/runPolicy.js";
+import { INDEX_VERSION } from "../services/indexing/indexPipeline.js";
 import { ftsIntegrityCheck } from "./scopedRunStore.js";
 import { createIndexRunner } from "../services/indexing/indexRunner.js";
 
@@ -378,6 +380,56 @@ test("follow-up (b): the caller's guard runs inside the copy transaction — a r
       store.close();
     }
     for (const [table, list] of Object.entries(rows(dbPath, "seeded"))) assert.equal(list.length, 0, `${table}: nothing seeded`);
+  } finally {
+    rmSync(repo, { recursive: true, force: true });
+  }
+}));
+
+test("FULL_BASE_LOOKBACK mirrors runPolicy's GIT_SCOPE_RUN_LOOKBACK", () => {
+  assert.equal(FULL_BASE_LOOKBACK, GIT_SCOPE_RUN_LOOKBACK);
+});
+
+test("MCP-ISSUE-130 (2): a seed over a new-version incremental base on an older full build carries the full build's version, so the child escalates", withTmp(async (dir) => {
+  const repo = makeRepo();
+  try {
+    const dbPath = path.join(dir, "g.db");
+    await fullIndex(dbPath, "parent", repo);
+    // The 339b6b3a shape: the full build is v-old; a later incremental (the seed's base) is stamped with this server's version.
+    rawDb(dbPath, (db) => {
+      db.prepare(`update index_runs set index_version = 'v1-old-build' where repo_id = 'parent' and mode = 'full'`).run();
+      addRunLike(db, "parent", { run_id: "incr-new", mode: "incremental", status: "ok", index_version: INDEX_VERSION, started_at: "2999-01-01T00:00:00.000Z", finished_at: "2999-01-01T00:00:01.000Z", skip_reason: null });
+    });
+    const store = new GraphStore(dbPath);
+    try {
+      assert.notEqual(versionEscalationFor(store, "parent"), null, "the parent itself escalates");
+      seedFromParent(store, { parentRepoId: "parent", childRepoId: "seeded", childRepoPath: slash(repo) });
+      const seedRow = rawDb(dbPath, (db) => db.prepare(`select mode, index_version as v, commit_sha as sha from index_runs where repo_id = 'seeded'`).get()) as { mode: string; v: string | null; sha: string };
+      assert.equal(seedRow.mode, "seed");
+      assert.equal(seedRow.v, "v1-old-build", "the version that built the copied rows, not the base run's");
+      assert.ok(seedRow.sha, "the commit still comes from the base run");
+      assert.match(versionEscalationFor(store, "seeded") ?? "", /last fully built by v1-old-build/, "the child's next run is full");
+    } finally {
+      store.close();
+    }
+  } finally {
+    rmSync(repo, { recursive: true, force: true });
+  }
+}));
+
+test("MCP-ISSUE-130 (2): a seed from a parent fully built by this version carries it, and the child does not escalate", withTmp(async (dir) => {
+  const repo = makeRepo();
+  try {
+    const dbPath = path.join(dir, "g.db");
+    await fullIndex(dbPath, "parent", repo);
+    const store = new GraphStore(dbPath);
+    try {
+      seedFromParent(store, { parentRepoId: "parent", childRepoId: "seeded", childRepoPath: slash(repo) });
+      const v = rawDb(dbPath, (db) => (db.prepare(`select index_version as v from index_runs where repo_id = 'seeded'`).get() as { v: string }).v);
+      assert.equal(v, INDEX_VERSION);
+      assert.equal(versionEscalationFor(store, "seeded"), null);
+    } finally {
+      store.close();
+    }
   } finally {
     rmSync(repo, { recursive: true, force: true });
   }

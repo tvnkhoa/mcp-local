@@ -4,7 +4,7 @@ import test from "node:test";
 
 import type { FieldAnswer } from "./fieldReferences.js";
 import type { FieldWorkerMessage, FieldWorkerRequest } from "./fieldWorker.js";
-import { FieldWorkerClient, MAX_QUEUED, type FieldQuery, type WorkerLike } from "./fieldWorkerClient.js";
+import { FieldWorkerClient, MAX_QUEUED, WORKER_CACHED_HOSTS, type FieldQuery, type WorkerLike } from "./fieldWorkerClient.js";
 
 /** A worker that answers only when the test says so. */
 class FakeWorker extends EventEmitter implements WorkerLike {
@@ -105,5 +105,48 @@ test("at most MAX_QUEUED distinct requests are outstanding; beyond that a call i
   assert.ok(performance.now() - started < 500);
   assert.ok(over.status === "cap_breach" && over.breach.kind === "building" && /already queued/.test(over.breach.detail));
   assert.equal(workers[0]!.requests.length, MAX_QUEUED);
+  await client.dispose();
+});
+
+test("MCP-ISSUE-131: the worker's LRU size is mirrored on this side", async () => {
+  const { MAX_CACHED_HOSTS } = await import("./languageServiceHost.js");
+  assert.equal(WORKER_CACHED_HOSTS, MAX_CACHED_HOSTS);
+});
+
+test("MCP-ISSUE-131: a repo is warm once the worker answered for it; a withheld or breach answer does not warm it", async () => {
+  const { client, workers } = harness();
+  assert.equal(client.isWarm("r", "/repo"), false, "no worker yet");
+  const first = client.ask(query("a", 5));
+  const worker = workers[0]!;
+  assert.ok((await first).status === "cap_breach", "withheld while building");
+  assert.equal(client.isWarm("r", "/repo"), false, "a withheld call does not warm it");
+  const breach: FieldAnswer = { status: "cap_breach", field: "a", breach: { kind: "time", detail: "zod parse pass: 60006 ms elapsed" }, meta: { engine: "typescript-language-service", cold: true, totalMs: 5, rssMb: 1 } };
+  worker.send({ type: "answer", id: worker.requests[0]!.id, answer: breach });
+  assert.equal(client.isWarm("r", "/repo"), false, "a time breach does not warm it");
+  const second = client.ask(query("b", 1_000));
+  worker.send({ type: "answer", id: worker.requests[1]!.id, answer: okAnswer("b") });
+  await second;
+  assert.equal(client.isWarm("r", "/repo"), true);
+  assert.equal(client.isWarm("r", "/other-path"), false, "keyed by repoId and repoPath");
+  await client.dispose();
+  assert.equal(client.isWarm("r", "/repo"), false, "losing the worker forgets every program");
+});
+
+test("MCP-ISSUE-131: asking about more repos than the worker caches evicts the least recently asked", async () => {
+  const { client, workers } = harness();
+  const ask = async (repoId: string): Promise<void> => {
+    const q = query(`f_${repoId}`, 1_000);
+    const pending = client.ask({ ...q, program: { ...q.program, repoId, repoPath: `/${repoId}` } });
+    const w = workers[0]!;
+    w.send({ type: "answer", id: w.requests.at(-1)!.id, answer: okAnswer(`f_${repoId}`) });
+    await pending;
+  };
+  await ask("a");
+  await ask("b");
+  assert.ok(client.isWarm("a", "/a") && client.isWarm("b", "/b"));
+  await ask("a");
+  await ask("c");
+  assert.equal(client.isWarm("b", "/b"), false, "b was the least recently asked");
+  assert.ok(client.isWarm("a", "/a") && client.isWarm("c", "/c"));
   await client.dispose();
 });

@@ -6,6 +6,7 @@
  * are filled for the child's new rowids only (never an FTS `'rebuild'`, which re-reads every repo), the
  * vectors are recomputed for the child, cross_repo_deps is left to the next full run, and one synthetic
  * `seed` run row, copied from the parent's latest ok run, is the base the git-scoped incremental diffs from.
+ * Its index_version is the one that built the copied rows (`parentFullBaseVersion`, MCP-ISSUE-130), not the base run's.
  *
  * Interface contract: ~/.claude/handover/briefs/2026-11-04-mcp-local-ix9-parallel.md (changes only via the leader).
  */
@@ -15,6 +16,7 @@ import { randomUUID } from "node:crypto";
 import type Database from "better-sqlite3";
 
 import type { GraphStore } from "./graphStore.js";
+import { getLatestFullRunVersion, listRecentWorkRuns } from "./runStore.js";
 import { ftsForgetRepo } from "./scopedRunStore.js";
 import { immediateTransaction } from "./sqliteTx.js";
 import { rebuildVectorIndexForRepo } from "./vectorStore.js";
@@ -174,6 +176,25 @@ export function seedBaseRunSha(db: Database.Database, parentRepoId: string): str
   return base.ok ? base.commitSha : null;
 }
 
+/**
+ * `GIT_SCOPE_RUN_LOOKBACK` in `services/indexing/runPolicy.ts`, mirrored so this repository module does not import the
+ * indexing pipeline; `seedStore.test.ts` asserts the two agree.
+ */
+export const FULL_BASE_LOOKBACK = 50;
+
+/**
+ * MCP-ISSUE-130 open item (2): the INDEX_VERSION that built the parent's rows, by the rule `versionEscalationFor`
+ * applies — the newest ok `full` or `seed` run among the recent work runs, else the latest ok full run. The seed row
+ * carries THIS version, not its base run's: the base may be an incremental run stamped with a newer version over an
+ * older full build (wec.aria run 339b6b3a), and a child stamped with that one would never run the full rebuild its
+ * copied rows need. Null when the parent has no full build on record (the child then escalates once, as any repo does).
+ */
+export function parentFullBaseVersion(db: Database.Database, parentRepoId: string): string | null {
+  const recent = listRecentWorkRuns(db, parentRepoId, FULL_BASE_LOOKBACK);
+  const newest = recent.find((r) => r.status === "ok" && (r.mode === "full" || r.mode === "seed"));
+  return newest ? newest.indexVersion : getLatestFullRunVersion(db, parentRepoId);
+}
+
 /** The seed row's tree key: the base's own key with the carried dirty paths as its files (null when neither exists). */
 function seedTreeKey(base: Record<string, unknown>, carried: Record<string, string>): { key: string | null; dirty: number } {
   let key: Record<string, unknown> | null = null;
@@ -221,6 +242,7 @@ export function seedFromParentDb(db: Database.Database, req: SeedRequest, guard?
       const baseRun = vouched.run;
       parentIndexedSha = vouched.commitSha;
       const treeKey = seedTreeKey(baseRun, vouched.carried);
+      const builtBy = parentFullBaseVersion(db, parentRepoId);
       db.prepare(
         `insert into repositories (repo_id, repo_path, updated_at, annotation_key, id_namespace) values (?, ?, ?, ?, ?)
          on conflict(repo_id) do update set repo_path = excluded.repo_path, updated_at = excluded.updated_at,
@@ -245,7 +267,7 @@ export function seedFromParentDb(db: Database.Database, req: SeedRequest, guard?
 
       const runCols = columnsOf(db, "index_runs");
       const values = runCols.map((c) =>
-        c === "run_id" ? randomUUID() : c === "repo_id" ? childRepoId : c === "mode" ? "seed" : c === "tree_key" ? treeKey.key : c === "tree_dirty" ? treeKey.dirty : baseRun[c]
+        c === "run_id" ? randomUUID() : c === "repo_id" ? childRepoId : c === "mode" ? "seed" : c === "tree_key" ? treeKey.key : c === "tree_dirty" ? treeKey.dirty : c === "index_version" ? builtBy : baseRun[c]
       );
       db.prepare(`insert into index_runs (${runCols.map((c) => `"${c}"`).join(", ")}) values (${runCols.map(() => "?").join(", ")})`).run(...(values as unknown[]));
       tablesCopied.index_runs = 1;

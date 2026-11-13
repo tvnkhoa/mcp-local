@@ -48,14 +48,26 @@ export type ExactFieldArgs = {
 
 type TsLsConfig = NonNullable<NonNullable<HandlerContext["constants"]>["TS_LS"]>;
 
-/** One field query, answered by the worker within the call's wait budget. */
-function askWorker(cfg: TsLsConfig, input: { repoId: string; repoPath: string; runKey: string; relativeFiles: readonly string[] }, field: string, pick: FieldPick): Promise<FieldAnswer> {
-  return getFieldWorkerClient().ask({
+/**
+ * One field query, answered by the worker within the call's wait budget. `coldWaitMs` (MCP-ISSUE-131) caps that wait
+ * when the repo's program is not warm in the worker — for a caller whose answer does not depend on the field query.
+ */
+function askWorker(
+  cfg: TsLsConfig,
+  input: { repoId: string; repoPath: string; runKey: string; relativeFiles: readonly string[] },
+  field: string,
+  pick: FieldPick,
+  coldWaitMs?: number
+): Promise<FieldAnswer> {
+  const client = getFieldWorkerClient();
+  const budget = cfg.remainingWaitMs?.() ?? cfg.waitMs ?? cfg.budgetMs;
+  const waitMs = coldWaitMs !== undefined && !client.isWarm(input.repoId, input.repoPath) ? Math.min(coldWaitMs, budget) : budget;
+  return client.ask({
     program: input,
     field,
     pick,
     caps: { budgetMs: cfg.budgetMs, maxRssMb: cfg.maxRssMb },
-    waitMs: cfg.remainingWaitMs?.() ?? cfg.waitMs ?? cfg.budgetMs
+    waitMs
   });
 }
 
@@ -93,16 +105,17 @@ export async function tryExactFieldAccesses(
 
 /**
  * The TS lane's raw answer for one field and pick, for callers that render it themselves
- * (`query_docs{mode:"term"}`). Null when the lane is off or the repo has no TS/JS files.
+ * (`query_docs{mode:"term"}`). Null when the lane is off or the repo has no TS/JS files. `opts.coldWaitMs`: see
+ * {@link askWorker}.
  */
-export async function exactFieldAnswer(ctx: HandlerContext, repoId: string, field: string, pick: FieldPick): Promise<FieldAnswer | null> {
+export async function exactFieldAnswer(ctx: HandlerContext, repoId: string, field: string, pick: FieldPick, opts: { coldWaitMs?: number } = {}): Promise<FieldAnswer | null> {
   const cfg = ctx.constants?.TS_LS;
   if (!cfg?.enabled) return null;
   const repo = ctx.store.getRepository(repoId);
   if (!repo) return null;
   const relativeFiles = ctx.store.listIndexedFilePaths(repoId, TS_JS_LANGUAGES);
   if (relativeFiles.length === 0) return null;
-  return askWorker(cfg, { repoId, repoPath: repo.repoPath, runKey: ctx.store.getLatestRun(repoId)?.runId ?? "none", relativeFiles }, field, cleanPick(pick));
+  return askWorker(cfg, { repoId, repoPath: repo.repoPath, runKey: ctx.store.getLatestRun(repoId)?.runId ?? "none", relativeFiles }, field, cleanPick(pick), opts.coldWaitMs);
 }
 
 function cleanPick(p: { declarationFile?: string; declarationLine?: number; ownerName?: string }): { declarationFile?: string; declarationLine?: number; ownerName?: string } {
