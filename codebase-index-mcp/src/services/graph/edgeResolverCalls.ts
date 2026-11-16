@@ -846,58 +846,9 @@ export function rebuildInterfaceDispatchEdges(db: Database.Database, repoId: str
   // resolved CALLS, so it runs here, where every run (full or scoped) rebuilds after call resolution. After the
   // dispatch delete (review): its existence checks must not see last run's dispatch rows on a scoped run.
   rebuildPythonUntypedReceiverEdges(db, repoId);
-  const calls = db
-    .prepare(
-      `select distinct e.from_id as fromId, s.symbol_id as methodId, s.name as name, s.parent_symbol_id as ifaceId, s.signature as signature
-       from edges e
-       inner join symbols s on s.repo_id = e.repo_id and s.symbol_id = e.to_id
-       inner join symbols i on i.repo_id = s.repo_id and i.symbol_id = s.parent_symbol_id and i.kind = 'interface'
-       where e.repo_id = ? and e.type = 'CALLS' and e.reason in (?, ?) and s.kind = 'method'
-       order by e.from_id, s.symbol_id`
-    )
-    .all(repoId, INTERFACE_METHOD_REASON, INTERFACE_METHOD_UNPROVEN_REASON) as { fromId: string; methodId: string; name: string; ifaceId: string; signature: string | null }[];
+  const calls = interfaceCalls(db, repoId);
   if (calls.length === 0) return 0;
-  /** MCP-ISSUE-133: implementer TYPES per interface (not their files) — a file can hold several types. */
-  const implementors = new Map<string, { implId: string; filePath: string }[]>();
-  /** PY-6: Python implementer class ids per interface — Python files often hold several implementers. */
-  const pythonImplementors = new Map<string, string[]>();
-  for (const r of db
-    .prepare(
-      `select distinct e.to_id as ifaceId, s.file_path as filePath, s.symbol_id as implId
-       from edges e
-       inner join symbols s on s.repo_id = e.repo_id and s.symbol_id = e.from_id
-       where e.repo_id = ? and e.type = 'IMPLEMENTS' and s.kind in ('class', 'struct', 'record', 'record struct')
-       order by e.to_id, s.file_path, s.symbol_id`
-    )
-    .all(repoId) as { ifaceId: string; filePath: string; implId: string }[]) {
-    if (isPythonFile(r.filePath)) {
-      const ids = pythonImplementors.get(r.ifaceId);
-      if (ids) ids.push(r.implId);
-      else pythonImplementors.set(r.ifaceId, [r.implId]);
-      continue;
-    }
-    const list = implementors.get(r.ifaceId);
-    if (list) list.push({ implId: r.implId, filePath: r.filePath });
-    else implementors.set(r.ifaceId, [{ implId: r.implId, filePath: r.filePath }]);
-  }
-  // MCP-ISSUE-133: same-named method rows with their owner and signature, per name, ordered like the
-  // candidate map (file, id) so the pick among equals is the one it always was.
-  const methodRowsStmt = db.prepare(
-    `select symbol_id as symbolId, file_path as filePath, parent_symbol_id as parentSymbolId, signature from symbols
-     where repo_id = ? and name = ? and kind = 'method'
-     order by file_path, symbol_id`
-  );
-  const methodRowsByName = new Map<string, MemberCandidate[]>();
-  const methodRows = (name: string): MemberCandidate[] => {
-    let rows = methodRowsByName.get(name);
-    if (!rows) {
-      rows = methodRowsStmt.all(repoId, name) as MemberCandidate[];
-      methodRowsByName.set(name, rows);
-    }
-    return rows;
-  };
-  // MCP-ISSUE-133 (row #10): each non-Python class's in-repo base, for an implementer that inherits the method.
-  const classBases = implementors.size > 0 ? buildClassBases(db, repoId) : new Map<string, ClassBase>();
+  const { typed, python: pythonImplementors } = interfaceImplementors(db, repoId);
   const candidateMap = buildNamedCandidateMap(db, repoId, ["function", "method", "constructor", "class"]);
   // PY-5b: the base chains the Python fan-out walks — only built when a Protocol has implementers.
   const pythonBases = pythonImplementors.size > 0
@@ -910,20 +861,10 @@ export function rebuildInterfaceDispatchEdges(db: Database.Database, repoId: str
   );
   let count = 0;
   const tx = immediateTransaction(db, () => {
+    for (const d of planTypedDispatch(db, repoId, calls, typed)) {
+      count += insert.run(repoId, d.fromId, d.targetId, repoId, d.fromId, d.targetId).changes;
+    }
     for (const call of calls) {
-      // MCP-ISSUE-133: the method the implementer TYPE declares, the overload with the interface method's
-      // arity — this used to take the first same-named method in the implementer's FILE, which on a file with
-      // a helper type, a nested type or a second implementer is another type's method.
-      // The cap still counts FILES, as it always has: counting types instead changed which implementers survive
-      // it (wec.communication-hub: `ISender`, 11 implementers in 6 files) — every type in a capped file is reached.
-      const arity = parameterCount(call.signature, call.name);
-      const listed = implementors.get(call.ifaceId) ?? [];
-      const cappedFiles = new Set([...new Set(listed.map((i) => i.filePath))].slice(0, MAX_INTERFACE_DISPATCH_FANOUT));
-      for (const { implId, filePath } of listed.filter((i) => cappedFiles.has(i.filePath))) {
-        const impl = pickInheritedMethod(methodRows(call.name), (id) => classBases.get(id), implId, filePath, call.name, arity);
-        if (!impl || impl.symbolId === call.methodId) continue;
-        count += insert.run(repoId, call.fromId, impl.symbolId, repoId, call.fromId, impl.symbolId).changes;
-      }
       // PY-6: a Python implementer's method, by owner rather than by file. A pipeline's stage list is
       // usually longer than the C# cap, so Python Protocols get a larger one.
       // PY-5b: the method the implementer RUNS — its own, else the first up its MRO: a base class's, or a
@@ -938,6 +879,114 @@ export function rebuildInterfaceDispatchEdges(db: Database.Database, repoId: str
   });
   tx();
   return count;
+}
+
+/** A CALLS edge into an interface method; `proven` is 1 when one of its rows is a proven-receiver bind. */
+type InterfaceCall = { fromId: string; methodId: string; name: string; ifaceId: string; signature: string | null; proven: number };
+
+function interfaceCalls(db: Database.Database, repoId: string): InterfaceCall[] {
+  return db
+    .prepare(
+      `select e.from_id as fromId, s.symbol_id as methodId, s.name as name, s.parent_symbol_id as ifaceId, s.signature as signature,
+              max(e.reason = ?) as proven
+       from edges e
+       inner join symbols s on s.repo_id = e.repo_id and s.symbol_id = e.to_id
+       inner join symbols i on i.repo_id = s.repo_id and i.symbol_id = s.parent_symbol_id and i.kind = 'interface'
+       where e.repo_id = ? and e.type = 'CALLS' and e.reason in (?, ?) and s.kind = 'method'
+       group by e.from_id, s.symbol_id
+       order by e.from_id, s.symbol_id`
+    )
+    .all(INTERFACE_METHOD_REASON, repoId, INTERFACE_METHOD_REASON, INTERFACE_METHOD_UNPROVEN_REASON) as InterfaceCall[];
+}
+
+/** Implementer types per interface: typed languages by type and file (MCP-ISSUE-133), Python by class id (PY-6). */
+function interfaceImplementors(db: Database.Database, repoId: string): {
+  typed: Map<string, { implId: string; filePath: string }[]>;
+  python: Map<string, string[]>;
+} {
+  const typed = new Map<string, { implId: string; filePath: string }[]>();
+  const python = new Map<string, string[]>();
+  for (const r of db
+    .prepare(
+      `select distinct e.to_id as ifaceId, s.file_path as filePath, s.symbol_id as implId
+       from edges e
+       inner join symbols s on s.repo_id = e.repo_id and s.symbol_id = e.from_id
+       where e.repo_id = ? and e.type = 'IMPLEMENTS' and s.kind in ('class', 'struct', 'record', 'record struct')
+       order by e.to_id, s.file_path, s.symbol_id`
+    )
+    .all(repoId) as { ifaceId: string; filePath: string; implId: string }[]) {
+    if (isPythonFile(r.filePath)) {
+      const ids = python.get(r.ifaceId);
+      if (ids) ids.push(r.implId);
+      else python.set(r.ifaceId, [r.implId]);
+      continue;
+    }
+    const list = typed.get(r.ifaceId);
+    if (list) list.push({ implId: r.implId, filePath: r.filePath });
+    else typed.set(r.ifaceId, [{ implId: r.implId, filePath: r.filePath }]);
+  }
+  return { typed, python };
+}
+
+/** One planned C#/TS dispatch: the caller, the method it reaches, and the implementer type that runs it. */
+export type TypedDispatch = { fromId: string; targetId: string; implId: string };
+
+/**
+ * The C#/TS interface-dispatch fan-out as data. `rebuildInterfaceDispatchEdges` writes it, and
+ * `resolveBaseClassDispatch` reads it to learn WHICH implementers a dispatch edge into a virtual base method came
+ * from (row #10), so it fans out to those implementers' subclasses only.
+ *
+ * MCP-ISSUE-133: the method the implementer TYPE declares, the overload with the interface method's arity — this
+ * used to take the first same-named method in the implementer's FILE, which on a file with a helper type, a nested
+ * type or a second implementer is another type's method. The cap still counts FILES, as it always has: counting
+ * types instead changed which implementers survive it (wec.communication-hub: `ISender`, 11 implementers in 6
+ * files) — every type in a capped file is reached.
+ *
+ * Row #10: an implementer with no member of its own reaches the one it INHERITS up its in-repo base chain
+ * (`pickInheritedMethod`), but only from a PROVEN interface bind. An unproven-receiver bind is a guess at which
+ * interface the call goes through: on wec.social-ads it picked `ICampaignYoutubeRepository.AddAsync` for calls on
+ * seven other repositories, and the inherited walk turned the guess into edges to `PureRepository.AddAsync` — one
+ * of them past an override. Own-member dispatch from an unproven bind is unchanged.
+ */
+export function planTypedDispatch(
+  db: Database.Database,
+  repoId: string,
+  calls: readonly InterfaceCall[] = interfaceCalls(db, repoId),
+  implementors: ReadonlyMap<string, { implId: string; filePath: string }[]> = interfaceImplementors(db, repoId).typed
+): TypedDispatch[] {
+  if (calls.length === 0 || implementors.size === 0) return [];
+  // Same-named method rows with their owner and signature, per name, ordered like the candidate map (file, id)
+  // so the pick among equals is the one it always was.
+  const methodRowsStmt = db.prepare(
+    `select symbol_id as symbolId, file_path as filePath, parent_symbol_id as parentSymbolId, signature from symbols
+     where repo_id = ? and name = ? and kind = 'method'
+     order by file_path, symbol_id`
+  );
+  const methodRowsByName = new Map<string, MemberCandidate[]>();
+  const methodRows = (name: string): MemberCandidate[] => {
+    let rows = methodRowsByName.get(name);
+    if (!rows) {
+      rows = methodRowsStmt.all(repoId, name) as MemberCandidate[];
+      methodRowsByName.set(name, rows);
+    }
+    return rows;
+  };
+  const classBases = buildClassBases(db, repoId);
+  const inherited = (id: string): ClassBase | undefined => classBases.get(id);
+  const ownOnly = (): ClassBase | undefined => undefined;
+  const out: TypedDispatch[] = [];
+  for (const call of calls) {
+    const arity = parameterCount(call.signature, call.name);
+    const baseOf = call.proven ? inherited : ownOnly;
+    const listed = implementors.get(call.ifaceId) ?? [];
+    const cappedFiles = new Set([...new Set(listed.map((i) => i.filePath))].slice(0, MAX_INTERFACE_DISPATCH_FANOUT));
+    for (const { implId, filePath } of listed.filter((i) => cappedFiles.has(i.filePath))) {
+      const impl = pickInheritedMethod(methodRows(call.name), baseOf, implId, filePath, call.name, arity);
+      if (!impl || impl.symbolId === call.methodId) continue;
+      out.push({ fromId: call.fromId, targetId: impl.symbolId, implId });
+    }
+  }
+  return out;
 }
 
 /**

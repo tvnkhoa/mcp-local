@@ -173,3 +173,37 @@ test("MCP-ISSUE-133 (row #10): an implementer that inherits the interface method
   rebuildInterfaceDispatchEdges(conn, "r");
   assert.deepEqual(calls(conn, "interface-dispatch"), ["caller>Base.Save", "caller>Mid.Save", "caller>Own.Save"]);
 });
+
+test("MCP-ISSUE-133 (row #10): base-class fan-out from an inherited dispatch reaches only the dispatching implementer's subclasses; an unproven bind does not walk", () => {
+  const conn = db();
+  sym(conn, "I", "IStore", "interface", "IStore.cs");
+  sym(conn, "I.Save", "Save", "method", "IStore.cs", "I", "void Save(int x);");
+  sym(conn, "Base", "PureStore", "class", "PureStore.cs");
+  sym(conn, "Base.Save", "Save", "method", "PureStore.cs", "Base", "public virtual void Save(int x)");
+  // The implementer the interface call runs on: inherits Save. Its subclass overrides it.
+  sym(conn, "Impl", "CampaignStore", "class", "CampaignStore.cs");
+  sym(conn, "Sub", "AuditedCampaignStore", "class", "AuditedCampaignStore.cs");
+  sym(conn, "Sub.Save", "Save", "method", "AuditedCampaignStore.cs", "Sub", "public override void Save(int x)");
+  // Another subclass of the base, NOT an implementer of IStore: a call through IStore never runs its override.
+  sym(conn, "Other", "AudienceStore", "class", "AudienceStore.cs");
+  sym(conn, "Other.Save", "Save", "method", "AudienceStore.cs", "Other", "public override void Save(int x)");
+  sym(conn, "viaIface", "Handle", "method", "H1.cs");
+  sym(conn, "viaGuess", "Handle", "method", "H2.cs");
+  sym(conn, "direct", "Run", "method", "H3.cs");
+  edge(conn, "Impl", "I", "IMPLEMENTS", "resolved interface");
+  edge(conn, "Impl", "Base", "EXTENDS", "base_list class", 0.95);
+  edge(conn, "Sub", "Impl", "EXTENDS", "base_list class", 0.95);
+  edge(conn, "Other", "Base", "EXTENDS", "base_list class", 0.95);
+  edge(conn, "viaIface", "I.Save", "CALLS", "resolved interface method");
+  edge(conn, "viaGuess", "I.Save", "CALLS", "resolved interface method (unproven receiver)", 0.7);
+  edge(conn, "direct", "Base.Save", "CALLS", "resolved callee by receiver type", 0.85);
+
+  rebuildInterfaceDispatchEdges(conn, "r");
+  resolveBaseClassDispatch(conn, "r");
+  assert.deepEqual(calls(conn, "interface-dispatch"), ["viaIface>Base.Save"], "the unproven bind reaches no inherited member");
+  assert.deepEqual(
+    calls(conn, "base-class-dispatch"),
+    ["direct>Other.Save", "viaIface>Sub.Save"],
+    "the interface caller reaches the implementer's subclass override, never AudienceStore's; a direct caller of the base keeps the base's fan-out"
+  );
+});

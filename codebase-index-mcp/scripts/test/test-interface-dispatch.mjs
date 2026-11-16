@@ -443,12 +443,103 @@ function runInheritedBaseMethod() {
   console.log("[ok] MCP-ISSUE-133 (row #10): dispatch and siblings reach a method inherited from an in-repo base");
 }
 
+// ── 7. Row #10: base-class fan-out after an inherited dispatch (the wec.social-ads shape) ──────────────
+
+const repoInterfaces = `
+namespace App.Abstractions;
+
+public interface ICampaignRepository
+{
+    void Update(Campaign campaign);
+}
+`;
+
+// PureRepository<T> declares a virtual Update. CampaignRepository implements ICampaignRepository and inherits it;
+// AudienceRepository, another subclass of the base and no implementer, overrides it; ArchivedCampaignRepository,
+// a subclass of the implementer, overrides it too.
+const repoClasses = `
+namespace App.Infrastructure;
+
+public class PureRepository<T>
+{
+    public virtual void Update(T entity) { }
+}
+
+public class CampaignRepository : PureRepository<Campaign>, ICampaignRepository { }
+`;
+const audienceRepo = `
+namespace App.Infrastructure;
+
+public sealed class AudienceRepository : PureRepository<Audience>
+{
+    public override void Update(Audience audience) { }
+}
+`;
+const archivedRepo = `
+namespace App.Infrastructure;
+
+public sealed class ArchivedCampaignRepository : CampaignRepository
+{
+    public override void Update(Campaign campaign) { }
+}
+`;
+const repoCaller = `
+namespace App.Handlers;
+
+public class ApproveHandler(ICampaignRepository campaigns)
+{
+    public void Handle(Campaign c) { campaigns.Update(c); }
+}
+`;
+
+function runBaseClassAfterInheritedDispatch() {
+  const dbPath = createTempDbPath("ifd-bcd");
+  const store = new GraphStore(dbPath);
+  const repoId = "ifd-bcd";
+  store.ensureRepository(repoId, path.dirname(dbPath));
+
+  const files = [
+    indexFile(store, repoId, "src/Abstractions/Repos.cs", repoInterfaces),
+    indexFile(store, repoId, "src/Infrastructure/Repository.cs", repoClasses),
+    indexFile(store, repoId, "src/Infrastructure/AudienceRepository.cs", audienceRepo),
+    indexFile(store, repoId, "src/Infrastructure/ArchivedCampaignRepository.cs", archivedRepo)
+  ];
+  const caller = indexFile(store, repoId, "src/Handlers/ApproveHandler.cs", repoCaller);
+  // indexRunner's post-phase order: IMPLEMENTS, EXTENDS, calls, interface dispatch, then base-class dispatch.
+  store.resolveImplementsEdges(repoId);
+  store.resolveExtendsEdges(repoId);
+  const ctx = store.buildCallResolutionContext(repoId);
+  while (store.resolveCallEdgesBatch(repoId, ctx, 5000) > 0) { /* drain */ }
+  store.rebuildInterfaceDispatchEdges(repoId);
+  store.resolveBaseClassDispatch(repoId);
+
+  const byId = new Map(files.flatMap((f) => f.symbols).map((s) => [s.symbolId, s]));
+  const label = (id) => {
+    const s = byId.get(id);
+    return s ? `${byId.get(s.parentSymbolId)?.name ?? "(none)"}.${s.name}` : id;
+  };
+  const handle = caller.symbols.find((s) => s.kind === "method" && s.name === "Handle");
+  const out = store.getCallEdges(repoId, handle.symbolId, "callees", 50).filter((e) => byId.has(e.toId));
+  const by = (reason) => out.filter((e) => e.reason === reason).map((e) => label(e.toId)).sort();
+  assert.deepEqual(by("interface-dispatch"), ["PureRepository.Update"], `the inherited Update runs (got ${JSON.stringify(by("interface-dispatch"))})`);
+  assert.deepEqual(
+    by("base-class-dispatch"),
+    ["ArchivedCampaignRepository.Update"],
+    `only the implementer's own subclass override, never AudienceRepository's (got ${JSON.stringify(by("base-class-dispatch"))})`
+  );
+
+  store.close();
+  fs.rmSync(path.dirname(dbPath), { recursive: true });
+  console.log("[ok] row #10: base-class fan-out after an inherited dispatch stays in the dispatching implementer's subtree");
+}
+
 try {
   runExtraction();
   runResolutionAndQuery();
   runStaleIndexSafetyNet();
   runIssue133();
   runInheritedBaseMethod();
+  runBaseClassAfterInheritedDispatch();
   console.log("[ok] test-interface-dispatch passed");
 } catch (err) {
   console.error("test-interface-dispatch: FAILED:", err.message);

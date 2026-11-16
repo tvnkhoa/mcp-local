@@ -64,35 +64,42 @@
   classes; Python keeps its C3 MRO walk). The query-layer `expandInterfaceSiblings` uses the same walk when an implementer
   has no own member. A framework base (`base:DbContext`, external boundary) ends the chain. Cross-repo bases are out of
   scope.
+- **Only from a proven bind (row #10b).** The inherited walk runs only when the call reached the interface method through a
+  proven receiver (`resolved interface method`). An `unproven receiver` bind guesses the interface by name. The inherited
+  walk turned those guesses into edges: on wec.social-ads, 9 calls on seven other repositories became edges to
+  `PureRepository.AddAsync` through a guessed `ICampaignYoutubeRepository.AddAsync`, and one of them,
+  `CreateMetaAudienceCommandHandler.Handle`, went past `MetaAudienceRepository`'s override. Own-member dispatch from an
+  unproven bind is unchanged. The query-layer sibling walk has no bind and keeps the inherited walk.
+- **Base-class fan-out (row #10b, `edgeResolverContracts.ts` `resolveBaseClassDispatch`).** The base-class pass fanned every
+  CALLS edge into a virtual method out to every subclass override, including the new `interface-dispatch` edges into
+  `PureRepository.Update`. That sent every `ICampaignRepository.Update` caller to `MetaAudienceRepository.Update`
+  (31 edges), though the receiver is a `CampaignRepository`. Now a caller that reaches the virtual method ONLY through
+  interface dispatch fans out from the implementers that dispatched to it: the subclasses of `CampaignRepository`, not of
+  `PureRepository`. Those implementers are read from `planTypedDispatch`, the C#/TS dispatch plan, which
+  `rebuildInterfaceDispatchEdges` also writes from. When the implementer owns the method itself, the implementer IS the
+  base, and the fan-out is unchanged. A direct caller of the base keeps the base's fan-out. A dispatch row the plan does
+  not explain (Python's own lane) keeps the old fan-out.
 - **INDEX_VERSION** `v17-owner-dispatch-py-protocols` → `v18-inherited-dispatch`: dispatch targets change for unchanged
   files, so an index built at v17 escalates its next scoped run to FULL. Measured on a scratch copy of a v17
   wec.communication-hub index: an `incremental` request ran `mode: full`.
-- **Measured** (scratch DBs, base build ad5ddd0 vs fix, full runs): wec.communication-hub @93488c1, mcp-local @ad5ddd0
-  (TS/JS/Py) and translate @98b1bd3 (Py) have CALLS sets identical at sha256 level. CommHub has one implementer
-  without its own member (`ApplicationDbContext`), and its base is the framework `DbContext`. ssnet @597b162 and wec.document-management @27bf9b8 are also identical.
-  wec.social-ads @3dbf741 (4 uncommitted files in that repo, the same tree for both runs): CALLS 21 144 → 21 207,
-  **+63, 0 removed**:
-  - **23 `interface-dispatch` → `PureRepository.Update@26`: correct.** Typed `ICampaignRepository` fields call `Update`
-    (e.g. `ApproveCampaignCommandHandler.Handle` line 117, `CancelCampaignCommandHandler.Handle` 95,
+- **Measured** (scratch DBs, full runs, base build ad5ddd0 vs the final fix):
+  - wec.social-ads @3dbf741 (4 uncommitted files in that repo, the same tree for both runs): CALLS 21 144 → 21 167,
+    **+23, 0 removed**, all `interface-dispatch` → `PureRepository.Update@26`. Correct: typed `ICampaignRepository`
+    fields call `Update` (e.g. `ApproveCampaignCommandHandler.Handle` line 117, `CancelCampaignCommandHandler.Handle` 95,
     `LaunchingToLaunchedJob.ExecuteAsync` 78, `PlatformCampaignService.UpdateCampaignWithPlatformInfoAsync` 118,
-    `ApprovalAutoCancelJob.ExecuteAsync` 138). `CampaignRepository : PureRepository<Campaign>, ICampaignRepository` has
-    no `Update` of its own, so the inherited `PureRepository.Update` is what runs.
-  - **9 `interface-dispatch` → `PureRepository.AddAsync@17`: right base, wrong route.** Each sits on an existing
-    `resolved interface method (unproven receiver)` bind to `ICampaignYoutubeRepository.AddAsync`
-    (`CampaignYoutubeRepository : PureRepository<CampaignYoutube>, ICampaignYoutubeRepository`). The callers really call
-    `ITenantRepository` / `IMediaRepository` / `ISocialPlatformAccountRepository` / `ITargeting*RefRepository` /
-    `IMetaAudienceRepository.AddAsync`, which those interfaces inherit from `IPureRepository<T>` and do not declare. The
-    `PureRepository.AddAsync` target is what runs for an implementer that does not override it. For
-    `CreateMetaAudienceCommandHandler.Handle` it is wrong: `MetaAudienceRepository` overrides `AddAsync`.
-  - **31 `base-class-dispatch` → `MetaAudienceRepository.Update@64` / `.AddAsync@59`: wrong (over-approximation).**
-    `resolveBaseClassDispatch` fans every CALLS edge into a virtual method out to every subclass override, including the
-    new `interface-dispatch` edges into `PureRepository.Update`. The receiver behind `ICampaignRepository` is a
-    `CampaignRepository`, never a `MetaAudienceRepository`. This chaining is how base-class dispatch already behaves for
-    any caller of a virtual method. Row #10 gives it new inputs and does not change it (`edgeResolverContracts.ts` is out
-    of this row's scope). Proposed follow-up: when the CALLS edge into the virtual method is itself `interface-dispatch`
-    from implementer `K`, fan out only to overrides in subclasses of `K`.
-- **Tests:** `dispatchRebuild.test.ts` (inherited, abstract root + middle override, an other-owner method in the base's
-  file, an own `new` method, a cycle, a framework base token), `interfaceSiblings.test.ts` (`pickInheritedMethod`),
-  `test:interface-dispatch` section 6 (real C# extraction: plain base, generic `RepoBase<T>`, abstract root overridden in
-  the middle; dispatch and siblings). They fail at ad5ddd0 and pass with the fix. `runPolicy.test.ts` covers the v18
-  generation and the escalation from v17.
+    `ApprovalAutoCancelJob.ExecuteAsync` 138), and `CampaignRepository : PureRepository<Campaign>, ICampaignRepository`
+    has no `Update` of its own. The first cut of row #10 added 63: these 23, plus the 9 unproven-bind edges and the 31
+    fan-out edges above.
+  - wec.communication-hub @82347cd, mcp-local @eb7e730 (TS/JS/Py), translate @98b1bd3 (Py), ssnet @597b162 and
+    wec.document-management @27bf9b8: CALLS identical at sha256 level. CommHub's only implementer without its own member
+    is `ApplicationDbContext`, whose base is the framework `DbContext`.
+- **Tests:**
+  - `dispatchRebuild.test.ts`: inherited method, abstract root + middle override, an other-owner method in the base's
+    file, an own `new` method, a cycle, a framework base token. Also: base-class fan-out restricted to the dispatching
+    implementer's subclasses, a direct caller keeping the base's fan-out, and an unproven bind that does not walk.
+  - `interfaceSiblings.test.ts` covers `pickInheritedMethod`.
+  - `test:interface-dispatch` uses real C# extraction. Section 6: plain base, generic `RepoBase<T>`, abstract root
+    overridden in the middle. Section 7: the wec.social-ads shape (`PureRepository<T>`, an inheriting implementer, an
+    overriding non-implementer, and an overriding subclass of the implementer).
+  - Section 6 fails at ad5ddd0; section 7 and the fan-out unit case fail at 00eaf6f. All pass with the fix.
+  - `runPolicy.test.ts` covers the v18 generation and the escalation from v17.
