@@ -251,10 +251,101 @@ function runStaleIndexSafetyNet() {
   console.log("[ok] stale-index safety net: sibling expansion finds interface-routed callers without dispatch edges");
 }
 
+// ── 5. MCP-ISSUE-133: the implementer TYPE's method, from real C# extraction ──────────────────────
+
+const issue133Interfaces = `
+namespace App.Abstractions;
+
+public interface IAuditSink
+{
+    void Save(string key, int value);
+}
+
+public interface IStore
+{
+    Task Save(string key, int value);
+}
+`;
+
+// A helper type that sorts first and is not an implementer, a nested type with its own Save, and two
+// implementers — one with an overload of the wrong arity declared first.
+const issue133Stores = `
+namespace App.Infrastructure;
+
+public class AaHelper
+{
+    public void Save(string key, int value) { }
+}
+
+public class StoreA : IStore
+{
+    public class Inner
+    {
+        public void Save(string key, int value) { }
+    }
+
+    public Task Save(string key, int value) => Task.CompletedTask;
+}
+
+public class StoreB : IStore
+{
+    public Task Save(string key) => Task.CompletedTask;
+    public Task Save(string key, int value) => Task.CompletedTask;
+}
+`;
+
+const issue133Caller = `
+namespace App.Handlers;
+
+public class SaveHandler(IStore store)
+{
+    public async Task Handle() { await store.Save("k", 1); }
+}
+`;
+
+function runIssue133() {
+  const dbPath = createTempDbPath("ifd-133");
+  const store = new GraphStore(dbPath);
+  const repoId = "ifd-133";
+  store.ensureRepository(repoId, path.dirname(dbPath));
+
+  const ifaces = indexFile(store, repoId, "src/Abstractions/Contracts.cs", issue133Interfaces);
+  const stores = indexFile(store, repoId, "src/Infrastructure/Stores.cs", issue133Stores);
+  const caller = indexFile(store, repoId, "src/Handlers/SaveHandler.cs", issue133Caller);
+  store.resolveImplementsEdges(repoId);
+  const ctx = store.buildCallResolutionContext(repoId);
+  while (store.resolveCallEdgesBatch(repoId, ctx, 5000) > 0) { /* drain */ }
+  store.rebuildInterfaceDispatchEdges(repoId);
+
+  const byId = new Map([...ifaces.symbols, ...stores.symbols].map((s) => [s.symbolId, s]));
+  const owner = (s) => byId.get(s.parentSymbolId)?.name ?? "(none)";
+  const label = (id) => {
+    const s = byId.get(id);
+    return s ? `${owner(s)}.${s.name}/${(s.signature ?? "").match(/\(([^)]*)\)/)?.[1].split(",").length ?? "?"}` : id;
+  };
+  const handle = caller.symbols.find((s) => s.kind === "method" && s.name === "Handle");
+  const out = store.getCallEdges(repoId, handle.symbolId, "callees", 50).filter((e) => byId.has(e.toId));
+  const direct = [...new Set(out.filter((e) => e.reason !== "interface-dispatch").map((e) => label(e.toId)))];
+  const dispatch = out.filter((e) => e.reason === "interface-dispatch").map((e) => label(e.toId)).sort();
+
+  assert.deepEqual(direct, ["IStore.Save/2"], `the call binds IStore's Save, not IAuditSink's from the same file (got ${JSON.stringify(direct)})`);
+  assert.deepEqual(dispatch, ["StoreA.Save/2", "StoreB.Save/2"], `each implementer's own Save, the 2-parameter overload (got ${JSON.stringify(dispatch)})`);
+
+  // The query-layer sibling expansion (stale-index safety net) agrees: IStore.Save's siblings are the same two.
+  const ifaceSave = ifaces.symbols.find((s) => s.kind === "method" && owner(s) === "IStore");
+  const siblings = store.expandInterfaceSiblings(repoId, [ifaceSave.symbolId]).filter((s) => s.via === "interface").map((s) => label(s.symbolId)).sort();
+  assert.deepEqual(siblings, ["StoreA.Save/2", "StoreB.Save/2"], `interface siblings (got ${JSON.stringify(siblings)})`);
+
+  store.close();
+  fs.rmSync(path.dirname(dbPath), { recursive: true });
+  console.log("[ok] MCP-ISSUE-133: dispatch and siblings reach each implementer type's own Save overload");
+}
+
 try {
   runExtraction();
   runResolutionAndQuery();
   runStaleIndexSafetyNet();
+  runIssue133();
   console.log("[ok] test-interface-dispatch passed");
 } catch (err) {
   console.error("test-interface-dispatch: FAILED:", err.message);
