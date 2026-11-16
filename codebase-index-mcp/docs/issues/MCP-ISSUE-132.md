@@ -36,9 +36,10 @@
   - At most 4 outstanding searches (`queue` beyond). The worker exits after 5 min idle and on shutdown. Its KNN memo
     is cleared with the server thread's caches (`GraphStore.onProcessCachesInvalidated`: run landed, purge, seed).
   - Bundled: `scripts/bundle.mjs` ENTRIES has `vectorSearchWorker`, beside `index.js` in `dist/bundle/`.
-- **After:** harness ticks late > 100 ms: 0-1 per run, max 0-115 ms; the bound is a fixed 250 ms (× 2.5 on CI) —
-  row #19's load-aware bound is removed. Negative control: `LOCK_SERVER_ENTRY` pointing at a 44e1e9a build fails (b)
-  (max 472 ms). The `nearby` answers are unchanged: 8/8 big reads `nearby:4` before and after; on the live DB the
+- **After:** harness ticks late > 100 ms: 0-1 per run, max 0-115 ms. The bound is a fixed 250 ms locally; on CI row
+  #19's load-aware bound stays, max(625, 0.15 × baseline big run) (leader ruling, 16 Nov). Negative controls: locally
+  `LOCK_SERVER_ENTRY` pointing at a 44e1e9a build fails (b) (max 472 ms); under `CI=true` the pre-fix blocks of this
+  machine sit below the CI bound, so the CI control is `LOCK_INJECT_BLOCK_MS` (>= 3x the bound). The `nearby` answers are unchanged: 8/8 big reads `nearby:4` before and after; on the live DB the
   worker's rows equal the in-thread rows for three near-miss names.
 - **Cost of the worker** (live DB, wec.communication-hub): first padded call including spawn 389 ms; RSS +20 MB after
   spawn, +2 MB after three KNNs.

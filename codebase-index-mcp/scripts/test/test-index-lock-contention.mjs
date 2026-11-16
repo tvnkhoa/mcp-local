@@ -10,8 +10,9 @@
  * Asserts:
  *   (a) 0 responses mention "locked" / SQLITE_BUSY, and both index runs end ok;
  *   (b) every read answers within the query budget + 2 s, and the server thread's longest block is bounded by
- *       MAX_BLOCK_MS (250 ms × CI_FACTOR; LOCK_MAX_BLOCK_MS pins it): the runs execute in the worker since IX-2 and the
- *       near-neighbour KNN in the vector-search worker since MCP-ISSUE-132; the read slack × 2.5 on CI (see CI_FACTOR);
+ *       MAX_BLOCK_MS (250 ms locally; on CI max(250 ms × CI_FACTOR, 0.15 × the baseline big run); LOCK_MAX_BLOCK_MS pins
+ *       it): the runs execute in the worker since IX-2 and the near-neighbour KNN in the vector-search worker since
+ *       MCP-ISSUE-132; the read slack × 2.5 on CI (see CI_FACTOR);
  *   (c) after the runs, the dirty edit on `small` is in the index (the queued refresh ran, behind `big`'s run) and no
  *       run is left: a read answers with the edit and is either not `refreshing`, or `refreshing` only because the
  *       gate's tree check outlived the budget ("checking the working tree …") while index_status lists no job and no
@@ -66,7 +67,7 @@ syncBuiltinESMExports();
 // ~830 ms against the 1000 ms bound. So on CI (GitHub sets CI=true) both timing bounds scaled by CI_FACTOR; since
 // row #19 below they keep it as a floor.
 //
-// Load-aware block bound (row #19, 2026-11-13; REMOVED by MCP-ISSUE-132 below — kept as history). CI 6208ca9 run 43440259585 failed (b) at 2855 ms against 2500 with every
+// Load-aware block bound (row #19, 2026-11-13; on CI only since MCP-ISSUE-132 below). CI 6208ca9 run 43440259585 failed (b) at 2855 ms against 2500 with every
 // run ok: big run 35.5 s on the runner (local 10-20 s), and each late tick is the search_symbols on `big` in flight at
 // that moment (big reads 833 / 2864 ms, blocks 828 / 2855 ms). 5d30ac1 saw 2075 ms with a 22 s big run. A fixed CI
 // factor cannot follow a runner that is 1.5x slower one day and 3x the next, so the bound is calibrated on the
@@ -85,13 +86,19 @@ syncBuiltinESMExports();
 // the server thread whenever FTS found < 3 rows, which is every name lookup on `big` while its full run rewrites it.
 // Proven on 44e1e9a: a CPU profile of server A put 2058 of 2097 ms of search_symbols in that query, and with the
 // server connection's busy_timeout forced to 0 there was no SQLITE_BUSY and the same 1061 ms block (not a lock wait).
-// The KNN now runs in the vector-search worker, so the load-aware bound of row #19 is gone: local runs at the fix show
-// no tick late by more than 100 ms. MAX_BLOCK_MS is a fixed 250 ms (× CI_FACTOR), below every block the defect produced
-// locally (433-1107 ms, 6 runs at 44e1e9a). The negative control for the defect: LOCK_SERVER_ENTRY=<a dist/index.js
-// built at 44e1e9a, inside this package so its imports resolve> runs both servers from that build; (b) must FAIL.
+// The KNN now runs in the vector-search worker; local runs at the fix show no tick late by more than ~115 ms.
+// - Locally MAX_BLOCK_MS is a fixed 250 ms, below every block the defect produced here (433-1107 ms, 6 runs at
+//   44e1e9a). The negative control for the defect: LOCK_SERVER_ENTRY=<a dist/index.js built at 44e1e9a, inside this
+//   package so its imports resolve> runs both servers from that build; (b) must FAIL.
+// - On CI (leader ruling, 16 Nov) row #19's load-aware bound stays: max(250 ms × CI_FACTOR, BLOCK_PER_RUN × baseline
+//   big run). The runner has been 1.5-3x slower than this machine from one day to the next, and one CI run is not yet
+//   evidence that nothing else on the server thread scales with it. That bound is above the pre-fix blocks of a fast
+//   machine, so under CI=true the negative control is the injected block (LOCK_INJECT_BLOCK_MS >= 3x the bound).
 const CI_FACTOR = process.env.CI ? 2.5 : 1;
 const MIN_BLOCK_MS = 250;
-const maxBlockFor = () => Number(process.env.LOCK_MAX_BLOCK_MS || MIN_BLOCK_MS * CI_FACTOR);
+const BLOCK_PER_RUN = 0.15;
+const maxBlockFor = (bigRunMs) =>
+  Number(process.env.LOCK_MAX_BLOCK_MS || (process.env.CI ? Math.max(MIN_BLOCK_MS * CI_FACTOR, Math.round(BLOCK_PER_RUN * bigRunMs)) : MIN_BLOCK_MS));
 const SERVER_ENTRY = process.env.LOCK_SERVER_ENTRY || "dist/index.js";
 const INJECT_BLOCK_MS = Number(process.env.LOCK_INJECT_BLOCK_MS ?? 0);
 const injectPreload = (sentinel) => `data:text/javascript,${encodeURIComponent(`
@@ -267,11 +274,11 @@ try {
   const inWindow = lags.slice(lagFloor).filter((l) => l.at >= t0 && l.at <= t1);
   const blocks = inWindow.filter((l) => !l.heartbeat);
   const maxLag = Math.max(0, ...blocks.map((l) => l.blockedMs));
-  const MAX_BLOCK_MS = maxBlockFor();
+  const MAX_BLOCK_MS = maxBlockFor(baselineBigMs);
   const bigReads = reads.filter((r) => r.repo === "big");
   const padding = bigReads.map((r) => (r.body?.paddingSkipped ? `skipped:${r.body.paddingSkipped}` : Array.isArray(r.body?.nearby) ? `nearby:${r.body.nearby.length}` : `names:${r.body?.count ?? "?"}`));
   console.log(`  info  big reads (baseline big run ${baselineBigMs} ms): ${padding.join(" ")}`);
-  console.log(`  info  server A main-thread ticks late > 100 ms: ${blocks.length}, max ${maxLag} ms; bound ${MAX_BLOCK_MS} ms${process.env.LOCK_MAX_BLOCK_MS ? " (LOCK_MAX_BLOCK_MS)" : ""}${SERVER_ENTRY !== "dist/index.js" ? `; NEGATIVE CONTROL server entry ${SERVER_ENTRY}` : ""}${INJECT_BLOCK_MS > 0 ? `; NEGATIVE CONTROL injected ${INJECT_BLOCK_MS} ms` : ""}`);
+  console.log(`  info  server A main-thread ticks late > 100 ms: ${blocks.length}, max ${maxLag} ms; bound ${MAX_BLOCK_MS} ms${process.env.LOCK_MAX_BLOCK_MS ? " (LOCK_MAX_BLOCK_MS)" : process.env.CI ? ` = max(${MIN_BLOCK_MS * CI_FACTOR}, ${BLOCK_PER_RUN} × baseline big run ${baselineBigMs} ms)` : " (local, fixed)"}${SERVER_ENTRY !== "dist/index.js" ? `; NEGATIVE CONTROL server entry ${SERVER_ENTRY}` : ""}${INJECT_BLOCK_MS > 0 ? `; NEGATIVE CONTROL injected ${INJECT_BLOCK_MS} ms` : ""}`);
   assert(inWindow.length > blocks.length, "(b) the lag sampler reported from inside the window");
   assert(maxLag <= MAX_BLOCK_MS, `(b) no server-thread block > ${MAX_BLOCK_MS} ms`, JSON.stringify(blocks.slice(0, 10)));
 
