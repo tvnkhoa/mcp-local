@@ -3,7 +3,7 @@ import { McpError, ErrorCode } from "@modelcontextprotocol/sdk/types.js";
 import {
   parseGitBlamePorcelain,
   redactEmail,
-  getRepoStaleness,
+  getRepoStalenessAsync,
   buildStaleWarning
 } from "../../services/git/gitHelpers.js";
 import { runGit } from "../../services/git/gitHelpers.js";
@@ -120,7 +120,7 @@ export async function handleSearchSymbols(
     results.length === 0 && strategyUsed === "name"
       ? "no results under strategy='name'; retry with strategy='intent' (multi-word/natural-language queries) or check filters."
       : undefined;
-  const staleness = args.repoId ? getRepoStaleness(args.repoId, store) : null;
+  const staleness = args.repoId ? await getRepoStalenessAsync(args.repoId, store) : null; // MCP-ISSUE-134: HEAD read off the server thread
   const coverage = buildCoverageBlock({ resultCount: results.length, kind: "search", query: args.query });
 
   // MCP-ISSUE-058(b): a result set that is ENTIRELY vector near-neighbours is not an answer to a name

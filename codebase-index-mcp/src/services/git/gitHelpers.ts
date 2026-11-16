@@ -100,55 +100,96 @@ const SHA_RE = /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/;
  * unborn branch — returns null.
  */
 export function readHeadShaFromFiles(repoPath: string): string | null {
+  const plan = headShaPlan(repoPath);
+  let step = plan.next();
+  while (!step.done) step = plan.next(headIoSync(step.value));
+  return step.value;
+}
+
+/**
+ * {@link readHeadShaFromFiles} on the libuv threadpool (MCP-ISSUE-134): the same steps, none of them on the server
+ * thread. A few small files is microseconds on an idle disk, but every read tool checks staleness, and a sync read
+ * waits out the disk queue — on a runner whose disk two full index runs are writing, that wait is the event loop's.
+ */
+export async function readHeadShaFromFilesAsync(repoPath: string): Promise<string | null> {
+  const plan = headShaPlan(repoPath);
+  let step = plan.next();
+  while (!step.done) step = plan.next(await headIoAsync(step.value));
+  return step.value;
+}
+
+/** One file-system step of {@link headShaPlan}: `stat` answers "dir" | "file" | null, `read` the text or null on any error. */
+type HeadIo = { op: "stat"; path: string } | { op: "read"; path: string };
+
+function headIoSync(io: HeadIo): string | null {
   try {
-    let dir = path.resolve(repoPath);
-    let gitDir: string | null = null;
-    for (;;) {
-      const dotGit = path.join(dir, ".git");
-      const st = fs.statSync(dotGit, { throwIfNoEntry: false });
-      if (st?.isDirectory()) {
-        gitDir = dotGit;
-        break;
-      }
-      if (st?.isFile()) {
-        const m = /^gitdir:\s*(.+?)\s*$/m.exec(fs.readFileSync(dotGit, "utf8"));
-        if (!m) return null;
-        gitDir = path.resolve(dir, m[1]);
-        break;
-      }
-      const parent = path.dirname(dir);
-      if (parent === dir) return null;
-      dir = parent;
-    }
-    const head = fs.readFileSync(path.join(gitDir, "HEAD"), "utf8").trim();
-    if (SHA_RE.test(head)) return head;
-    const ref = /^ref:\s*(refs\/\S+)$/.exec(head)?.[1];
-    if (!ref) return null;
-    let commonDir = gitDir;
-    try {
-      commonDir = path.resolve(gitDir, fs.readFileSync(path.join(gitDir, "commondir"), "utf8").trim());
-    } catch {
-      // Not a linked worktree: refs live in the git dir itself.
-    }
-    for (const base of commonDir === gitDir ? [gitDir] : [gitDir, commonDir]) {
-      const loose = path.join(base, ...ref.split("/"));
-      if (!fs.existsSync(loose)) continue;
-      const value = fs.readFileSync(loose, "utf8").trim();
-      return SHA_RE.test(value) ? value : null; // a symbolic ref chain: let git resolve it
-    }
-    const packed = fs.readFileSync(path.join(commonDir, "packed-refs"), "utf8");
-    for (const line of packed.split(/\r?\n/)) {
-      if (line.startsWith("#") || line.startsWith("^")) continue;
-      const space = line.indexOf(" ");
-      if (space > 0 && line.slice(space + 1) === ref) {
-        const sha = line.slice(0, space);
-        return SHA_RE.test(sha) ? sha : null;
-      }
-    }
-    return null;
+    if (io.op === "read") return fs.readFileSync(io.path, "utf8");
+    const st = fs.statSync(io.path, { throwIfNoEntry: false });
+    return st?.isDirectory() ? "dir" : st?.isFile() ? "file" : st ? "other" : null;
   } catch {
     return null;
   }
+}
+
+async function headIoAsync(io: HeadIo): Promise<string | null> {
+  try {
+    if (io.op === "read") return await fs.promises.readFile(io.path, "utf8");
+    const st = await fs.promises.stat(io.path);
+    return st.isDirectory() ? "dir" : st.isFile() ? "file" : "other";
+  } catch {
+    return null;
+  }
+}
+
+/** The steps of {@link readHeadShaFromFiles}, written once for its sync and async drivers; yields I/O, returns the sha or null. */
+function* headShaPlan(repoPath: string): Generator<HeadIo, string | null, string | null> {
+  let dir = path.resolve(repoPath);
+  let gitDir: string | null = null;
+  for (;;) {
+    const dotGit = path.join(dir, ".git");
+    const kind = yield { op: "stat", path: dotGit };
+    if (kind === "dir") {
+      gitDir = dotGit;
+      break;
+    }
+    if (kind === "file") {
+      const text = yield { op: "read", path: dotGit };
+      const m = text === null ? null : /^gitdir:\s*(.+?)\s*$/m.exec(text);
+      if (!m) return null;
+      gitDir = path.resolve(dir, m[1]!);
+      break;
+    }
+    const parent = path.dirname(dir);
+    if (parent === dir) return null;
+    dir = parent;
+  }
+  const headText = yield { op: "read", path: path.join(gitDir, "HEAD") };
+  if (headText === null) return null;
+  const head = headText.trim();
+  if (SHA_RE.test(head)) return head;
+  const ref = /^ref:\s*(refs\/\S+)$/.exec(head)?.[1];
+  if (!ref) return null;
+  const common = yield { op: "read", path: path.join(gitDir, "commondir") };
+  // No `commondir`: not a linked worktree, refs live in the git dir itself.
+  const commonDir = common === null ? gitDir : path.resolve(gitDir, common.trim());
+  for (const base of commonDir === gitDir ? [gitDir] : [gitDir, commonDir]) {
+    const loose = path.join(base, ...ref.split("/"));
+    if ((yield { op: "stat", path: loose }) === null) continue;
+    const value = yield { op: "read", path: loose };
+    if (value === null) return null;
+    return SHA_RE.test(value.trim()) ? value.trim() : null; // a symbolic ref chain: let git resolve it
+  }
+  const packed = yield { op: "read", path: path.join(commonDir, "packed-refs") };
+  if (packed === null) return null;
+  for (const line of packed.split(/\r?\n/)) {
+    if (line.startsWith("#") || line.startsWith("^")) continue;
+    const space = line.indexOf(" ");
+    if (space > 0 && line.slice(space + 1) === ref) {
+      const sha = line.slice(0, space);
+      return SHA_RE.test(sha) ? sha : null;
+    }
+  }
+  return null;
 }
 
 function realOrNull(p: string): string | null {
@@ -640,7 +681,7 @@ export async function countCommitsBehindAsync(repoPath: string, indexedSha: stri
 
 /** {@link resolveHeadCommitSha} without blocking the event loop (MCP-ISSUE-123): the files first, then `git rev-parse`. */
 export async function resolveHeadCommitShaAsync(repoPath: string): Promise<string | null> {
-  const fromFiles = readHeadShaFromFiles(repoPath);
+  const fromFiles = await readHeadShaFromFilesAsync(repoPath);
   if (fromFiles) return fromFiles;
   const r = await gitAsync(repoPath, ["rev-parse", "HEAD"]);
   return r.status === 0 ? r.stdout : null;
@@ -820,6 +861,15 @@ export function getRepoStaleness(
     isStale,
     note: isStale ? "index commit differs from repo HEAD" : "index is up-to-date"
   };
+}
+
+/**
+ * {@link getRepoStaleness} for a read tool's response (MCP-ISSUE-134): HEAD is read off the server thread
+ * ({@link resolveHeadCommitShaAsync}) on every call — no cache, so never an answer older than the last commit.
+ */
+export async function getRepoStalenessAsync(repoId: string, store: GraphStore): Promise<ReturnType<typeof getRepoStaleness>> {
+  const repo = store.getRepository(repoId);
+  return getRepoStaleness(repoId, store, repo ? await resolveHeadCommitShaAsync(repo.repoPath) : undefined);
 }
 
 /** Actionable staleness signal — lets a caller size the drift instead of just being told it exists (ISSUE-026). */

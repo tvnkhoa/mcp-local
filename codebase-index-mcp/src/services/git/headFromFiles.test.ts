@@ -5,13 +5,22 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
 
-import { readHeadShaFromFiles, resolveHeadCommitSha } from "./gitHelpers.js";
+import { readHeadShaFromFiles, readHeadShaFromFilesAsync, resolveHeadCommitSha, resolveHeadCommitShaAsync } from "./gitHelpers.js";
 
 /**
  * Release I1b — HEAD is read from the git directory's files instead of spawning `git rev-parse`
  * (a synchronous spawn held the server thread up to 1.9 s while the refresh worker loaded the CPU).
  * Every shape is checked against what git itself says.
+ *
+ * MCP-ISSUE-134: the same steps also run on the libuv threadpool (readHeadShaFromFilesAsync, for read tools), so
+ * every shape asserts the async reader agrees with the sync one.
  */
+
+async function head(dir: string): Promise<string | null> {
+  const sync = readHeadShaFromFiles(dir);
+  assert.equal(await readHeadShaFromFilesAsync(dir), sync, `async = sync for ${dir}`);
+  return sync;
+}
 
 const git = (cwd: string, ...args: string[]): string =>
   execFileSync("git", ["-C", cwd, "-c", "user.email=t@t", "-c", "user.name=t", "-c", "core.autocrlf=false", ...args], { encoding: "utf8", stdio: "pipe" }).trim();
@@ -29,44 +38,45 @@ function repo(): { dir: string; cleanup: () => void } {
   return { dir, cleanup: () => fs.rmSync(root, { recursive: true, force: true }) };
 }
 
-test("a branch HEAD through a loose ref, also from a subdirectory", () => {
+test("a branch HEAD through a loose ref, also from a subdirectory", async () => {
   const r = repo();
   try {
     const expected = git(r.dir, "rev-parse", "HEAD");
-    assert.equal(readHeadShaFromFiles(r.dir), expected);
-    assert.equal(readHeadShaFromFiles(path.join(r.dir, "sub", "deeper")), expected);
+    assert.equal(await head(r.dir), expected);
+    assert.equal(await head(path.join(r.dir, "sub", "deeper")), expected);
     assert.equal(resolveHeadCommitSha(r.dir), expected);
+    assert.equal(await resolveHeadCommitShaAsync(r.dir), expected);
   } finally { r.cleanup(); }
 });
 
-test("a branch HEAD through packed-refs, and a detached HEAD", () => {
+test("a branch HEAD through packed-refs, and a detached HEAD", async () => {
   const r = repo();
   try {
     git(r.dir, "pack-refs", "--all");
     const expected = git(r.dir, "rev-parse", "HEAD");
-    assert.equal(readHeadShaFromFiles(r.dir), expected, "packed");
+    assert.equal(await head(r.dir), expected, "packed");
     const first = git(r.dir, "rev-parse", "HEAD~1");
     git(r.dir, "checkout", "-q", "--detach", first);
-    assert.equal(readHeadShaFromFiles(r.dir), first, "detached");
+    assert.equal(await head(r.dir), first, "detached");
   } finally { r.cleanup(); }
 });
 
-test("a linked worktree (.git file + commondir)", () => {
+test("a linked worktree (.git file + commondir)", async () => {
   const r = repo();
   try {
     const wt = path.join(path.dirname(r.dir), "wt");
     git(r.dir, "worktree", "add", "-q", "-b", "side", wt, "HEAD~1");
-    assert.equal(readHeadShaFromFiles(wt), git(wt, "rev-parse", "HEAD"));
+    assert.equal(await head(wt), git(wt, "rev-parse", "HEAD"));
     // A commit on the worktree's branch is seen there and not in the main checkout.
     fs.writeFileSync(path.join(wt, "b.txt"), "b\n");
     git(wt, "add", ".");
     git(wt, "commit", "-q", "-m", "side");
-    assert.equal(readHeadShaFromFiles(wt), git(wt, "rev-parse", "HEAD"));
-    assert.equal(readHeadShaFromFiles(r.dir), git(r.dir, "rev-parse", "HEAD"));
+    assert.equal(await head(wt), git(wt, "rev-parse", "HEAD"));
+    assert.equal(await head(r.dir), git(r.dir, "rev-parse", "HEAD"));
   } finally { r.cleanup(); }
 });
 
-test("unborn branch and non-git directory: null (the caller falls back to git, which also says null)", () => {
+test("unborn branch and non-git directory: null (the caller falls back to git, which also says null)", async () => {
   const root = fs.mkdtempSync(path.join(tmpdir(), "cim-head-"));
   try {
     const plain = path.join(root, "plain");
@@ -74,10 +84,11 @@ test("unborn branch and non-git directory: null (the caller falls back to git, w
     // tmpdir itself is not inside a git repo on any machine this runs on; if it were, the walk-up
     // would find that repo — which is also what git does.
     const outside = (() => { try { git(plain, "rev-parse", "--git-dir"); return false; } catch { return true; } })();
-    if (outside) assert.equal(readHeadShaFromFiles(plain), null);
+    if (outside) assert.equal(await head(plain), null);
     const unborn = path.join(root, "unborn");
     git(root, "init", "-q", unborn);
-    assert.equal(readHeadShaFromFiles(unborn), null);
+    assert.equal(await head(unborn), null);
     assert.equal(resolveHeadCommitSha(unborn), null);
+    assert.equal(await resolveHeadCommitShaAsync(unborn), null);
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
