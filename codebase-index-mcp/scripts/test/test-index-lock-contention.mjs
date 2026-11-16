@@ -30,7 +30,7 @@
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { execFileSync } from "node:child_process";
-import { mkdirSync, writeFileSync, appendFileSync } from "node:fs";
+import { mkdirSync, writeFileSync, appendFileSync, existsSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { makeTempDir } from "./_fixtures.mjs";
@@ -94,6 +94,15 @@ syncBuiltinESMExports();
 //   big run). The runner has been 1.5-3x slower than this machine from one day to the next, and one CI run is not yet
 //   evidence that nothing else on the server thread scales with it. That bound is above the pre-fix blocks of a fast
 //   machine, so under CI=true the negative control is the injected block (LOCK_INJECT_BLOCK_MS >= 3x the bound).
+//
+// MCP-ISSUE-134 (row #12, 2026-11-16): CI ad5ddd0 run 43817444070 still failed (b) at 2620 ms (bound 2127), mid-run
+// (~8.7 s into a 17.2 s window), on the last big read (2752 ms) — after the KNN had moved to the worker (nearby:4).
+// A main-thread profile of server A (LOCK_CPU_PROF) put the remaining synchronous time of every read in blocking file
+// I/O, not SQL: getRepoStaleness → readHeadShaFromFiles (stat + read of .git HEAD/ref, 1.9 s over 122 reads, max
+// 92 ms) and the freshness gate's run-marker scan (readdir + each marker read twice, 0.6 s). A sync read waits out the
+// disk queue on the server thread; on a runner whose disk two full runs are writing, that is the stall. Neither CPU
+// nor I/O load on this machine reproduced 2.6 s; the per-read sync I/O is what the fix removed (2546 → 186 ms).
+// The late-tick line now names the read in flight for each block.
 const CI_FACTOR = process.env.CI ? 2.5 : 1;
 const MIN_BLOCK_MS = 250;
 const BLOCK_PER_RUN = 0.15;
@@ -111,6 +120,28 @@ if (isMainThread) {
     clearInterval(t);
     const end = Date.now() + ${INJECT_BLOCK_MS};
     while (Date.now() < end) { /* negative control: a synchronous block on the server thread */ }
+  }, 50);
+  t.unref();
+}
+`)}`;
+// Diagnosis (MCP-ISSUE-134): LOCK_CPU_PROF=<dir> CPU-profiles server A's main thread from start-up until the window
+// closes, then writes <dir>/server-a-<stamp>.cpuprofile (inspector API, so it works when the client kills the child).
+const CPU_PROF_DIR = process.env.LOCK_CPU_PROF ? resolve(process.env.LOCK_CPU_PROF) : "";
+const cpuProfPreload = (sentinel, out) => `data:text/javascript,${encodeURIComponent(`
+import fs from "node:fs";
+import { Session } from "node:inspector";
+import { isMainThread } from "node:worker_threads";
+if (isMainThread) {
+  const s = new Session();
+  s.connect();
+  s.post("Profiler.enable", () => s.post("Profiler.setSamplingInterval", { interval: 500 }, () => s.post("Profiler.start")));
+  const t = setInterval(() => {
+    if (!fs.existsSync(${JSON.stringify(sentinel)})) return;
+    clearInterval(t);
+    s.post("Profiler.stop", (err, res) => {
+      if (!err) fs.writeFileSync(${JSON.stringify(out)}, JSON.stringify(res.profile));
+      fs.rmSync(${JSON.stringify(sentinel)}, { force: true });
+    });
   }, 50);
   t.unref();
 }
@@ -171,12 +202,15 @@ writeRepo(repos.small.dir, {
 const dbPath = join(root, ".index", "index.db");
 mkdirSync(dirname(dbPath), { recursive: true });
 const injectSentinel = join(root, "inject-block.now");
+const cpuProfSentinel = join(root, "cpu-prof.stop");
+const cpuProfOut = CPU_PROF_DIR ? join(CPU_PROF_DIR, `server-a-${stamp}.cpuprofile`) : "";
+if (CPU_PROF_DIR) mkdirSync(CPU_PROF_DIR, { recursive: true });
 
 function server(name, withSampler, onLine) {
   const sampler = pathToFileURL(resolve("scripts/test/_lagSampler.mjs")).href;
   const transport = new StdioClientTransport({
     command: "node",
-    args: [...(withSampler ? ["--import", sampler] : []), ...(SLOW_GIT_MS > 0 ? ["--import", SLOW_GIT_PRELOAD] : []), ...(withSampler && INJECT_BLOCK_MS > 0 ? ["--import", injectPreload(injectSentinel)] : []), SERVER_ENTRY],
+    args: [...(withSampler ? ["--import", sampler] : []), ...(SLOW_GIT_MS > 0 ? ["--import", SLOW_GIT_PRELOAD] : []), ...(withSampler && INJECT_BLOCK_MS > 0 ? ["--import", injectPreload(injectSentinel)] : []), ...(withSampler && CPU_PROF_DIR ? ["--import", cpuProfPreload(cpuProfSentinel, cpuProfOut)] : []), SERVER_ENTRY],
     env: {
       ...process.env,
       CODEBASE_INDEX_ALLOWED_ROOTS: root,
@@ -252,11 +286,17 @@ try {
       ? { repoId: repos.small.id, query: i % 2 ? "smallBeta" : "smallAlpha", strategy: "name", limit: 5 }
       : { repoId: repos.big.id, query: `fb_${i}_1`, strategy: "name", limit: 5 };
     if (INJECT_BLOCK_MS > 0 && i === Math.floor(READS / 2)) writeFileSync(injectSentinel, "");
-    reads.push({ repo: onSmall ? "small" : "big", ...(await call(A.client, "search_symbols", args)) });
+    const startedAt = Date.now();
+    reads.push({ repo: onSmall ? "small" : "big", i, startedAt, ...(await call(A.client, "search_symbols", args)), endedAt: Date.now() });
     await sleep(150);
   }
   const [big, peer] = await Promise.all([bigRun, peerRun]);
   const t1 = Date.now();
+  if (CPU_PROF_DIR) {
+    writeFileSync(cpuProfSentinel, "");
+    for (let k = 0; k < 100 && existsSync(cpuProfSentinel); k++) await sleep(100);
+    console.log(`  info  CPU profile of server A: ${cpuProfOut} (window ${t0}..${t1})`);
+  }
 
   const lockedReads = reads.filter((r) => LOCKED.test(r.text));
   const erroredReads = reads.filter((r) => r.isError);
@@ -280,7 +320,11 @@ try {
   console.log(`  info  big reads (baseline big run ${baselineBigMs} ms): ${padding.join(" ")}`);
   console.log(`  info  server A main-thread ticks late > 100 ms: ${blocks.length}, max ${maxLag} ms; bound ${MAX_BLOCK_MS} ms${process.env.LOCK_MAX_BLOCK_MS ? " (LOCK_MAX_BLOCK_MS)" : process.env.CI ? ` = max(${MIN_BLOCK_MS * CI_FACTOR}, ${BLOCK_PER_RUN} × baseline big run ${baselineBigMs} ms)` : " (local, fixed)"}${SERVER_ENTRY !== "dist/index.js" ? `; NEGATIVE CONTROL server entry ${SERVER_ENTRY}` : ""}${INJECT_BLOCK_MS > 0 ? `; NEGATIVE CONTROL injected ${INJECT_BLOCK_MS} ms` : ""}`);
   assert(inWindow.length > blocks.length, "(b) the lag sampler reported from inside the window");
-  assert(maxLag <= MAX_BLOCK_MS, `(b) no server-thread block > ${MAX_BLOCK_MS} ms`, JSON.stringify(blocks.slice(0, 10)));
+  // MCP-ISSUE-134: label each block with the read in flight when it ended (a tick fires late at the block's end).
+  const inFlight = (l) => reads.find((r) => r.startedAt <= l.at && l.at <= r.endedAt + 50);
+  const labelled = blocks.map((l) => { const r = inFlight(l); return { ...l, read: r ? `#${r.i} ${r.repo} ${r.ms} ms${r.body?.freshness?.state ? ` ${r.body.freshness.state}` : ""}` : "none" }; });
+  if (blocks.length > 0) console.log(`  info  late ticks: ${labelled.map((l) => `${l.blockedMs} ms @+${l.at - t0} (read ${l.read})`).join("; ")}`);
+  assert(maxLag <= MAX_BLOCK_MS, `(b) no server-thread block > ${MAX_BLOCK_MS} ms`, JSON.stringify(labelled.slice(0, 10)));
 
   let found = null;
   const cStart = Date.now();

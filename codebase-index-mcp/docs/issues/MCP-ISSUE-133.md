@@ -45,9 +45,61 @@
   - `findMemberMethod` uses `pickOwnedMethod`.
 - **TS / Java:** TS uses the same path (its implementers come from IMPLEMENTS too); mcp-local shows no change because no
   file of it holds two implementers of one interface. There is no Java lane.
-- **Not covered:** an implementer that INHERITS the method from a base class gets no dispatch edge (before the fix it got
-  whatever same-named method its file held, if any). The call-site overload is not known; the arity comes from the
-  interface method the call resolved to.
+- **Not covered by row #2 (fixed in row #10, below):** an implementer that INHERITS the method from a base class got no
+  dispatch edge. Still not covered: the call-site overload is not known; the arity comes from the interface method the
+  call resolved to.
 - **Tests:** `dispatchRebuild.test.ts` (3 cases), `interfaceSiblings.test.ts`, and `test:interface-dispatch` section 5
   (real C# extraction: helper type, nested type, wrong-arity overload declared first, two interfaces with a same-named
   member in one file). They fail on 44e1e9a and pass with the fix.
+
+### Row #10 — the method an implementer inherits from a base class (FIXED 2026-11-16, branch `wt/cs-inherit`)
+
+- **Scenario:** `class Impl : Base, IFoo` where only `Base` declares `Do()`. A call through `IFoo.Do` got no
+  `interface-dispatch` edge, because `pickOwnedMethod` looked only at `Impl`'s own members, so `Base.Do` showed no
+  caller from the interface side.
+- **Fix:** `pickInheritedMethod` (`interfaceSiblings.ts`). It takes the implementer's own method first, then walks the
+  RESOLVED `EXTENDS` chain (in-repo class bases; for several resolved rows the first in extraction order), binding by owner
+  at each step. The most-derived declaration wins, so a `Mid` override beats an abstract `Root`. A cycle, or a chain past
+  16 steps, stops with no pick. `rebuildInterfaceDispatchEdges` builds the base map once (`buildClassBases`, non-Python
+  classes; Python keeps its C3 MRO walk). The query-layer `expandInterfaceSiblings` uses the same walk when an implementer
+  has no own member. A framework base (`base:DbContext`, external boundary) ends the chain. Cross-repo bases are out of
+  scope.
+- **Only from a proven bind (row #10b).** The inherited walk runs only when the call reached the interface method through a
+  proven receiver (`resolved interface method`). An `unproven receiver` bind guesses the interface by name. The inherited
+  walk turned those guesses into edges: on wec.social-ads, 9 calls on seven other repositories became edges to
+  `PureRepository.AddAsync` through a guessed `ICampaignYoutubeRepository.AddAsync`, and one of them,
+  `CreateMetaAudienceCommandHandler.Handle`, went past `MetaAudienceRepository`'s override. Own-member dispatch from an
+  unproven bind is unchanged. The query-layer sibling walk has no bind and keeps the inherited walk.
+- **Base-class fan-out (row #10b, `edgeResolverContracts.ts` `resolveBaseClassDispatch`).** The base-class pass fanned every
+  CALLS edge into a virtual method out to every subclass override, including the new `interface-dispatch` edges into
+  `PureRepository.Update`. That sent every `ICampaignRepository.Update` caller to `MetaAudienceRepository.Update`
+  (31 edges), though the receiver is a `CampaignRepository`. Now a caller that reaches the virtual method ONLY through
+  interface dispatch fans out from the implementers that dispatched to it: the subclasses of `CampaignRepository`, not of
+  `PureRepository`. Those implementers are read from `planTypedDispatch`, the C#/TS dispatch plan, which
+  `rebuildInterfaceDispatchEdges` also writes from. When the implementer owns the method itself, the implementer IS the
+  base, and the fan-out is unchanged. A direct caller of the base keeps the base's fan-out. A dispatch row the plan does
+  not explain (Python's own lane) keeps the old fan-out.
+- **INDEX_VERSION** `v17-owner-dispatch-py-protocols` → `v18-inherited-dispatch`: dispatch targets change for unchanged
+  files, so an index built at v17 escalates its next scoped run to FULL. Measured on a scratch copy of a v17
+  wec.communication-hub index: an `incremental` request ran `mode: full`.
+- **Measured** (scratch DBs, full runs, base build ad5ddd0 vs the final fix):
+  - wec.social-ads @3dbf741 (4 uncommitted files in that repo, the same tree for both runs): CALLS 21 144 → 21 167,
+    **+23, 0 removed**, all `interface-dispatch` → `PureRepository.Update@26`. Correct: typed `ICampaignRepository`
+    fields call `Update` (e.g. `ApproveCampaignCommandHandler.Handle` line 117, `CancelCampaignCommandHandler.Handle` 95,
+    `LaunchingToLaunchedJob.ExecuteAsync` 78, `PlatformCampaignService.UpdateCampaignWithPlatformInfoAsync` 118,
+    `ApprovalAutoCancelJob.ExecuteAsync` 138), and `CampaignRepository : PureRepository<Campaign>, ICampaignRepository`
+    has no `Update` of its own. The first cut of row #10 added 63: these 23, plus the 9 unproven-bind edges and the 31
+    fan-out edges above.
+  - wec.communication-hub @82347cd, mcp-local @eb7e730 (TS/JS/Py), translate @98b1bd3 (Py), ssnet @597b162 and
+    wec.document-management @27bf9b8: CALLS identical at sha256 level. CommHub's only implementer without its own member
+    is `ApplicationDbContext`, whose base is the framework `DbContext`.
+- **Tests:**
+  - `dispatchRebuild.test.ts`: inherited method, abstract root + middle override, an other-owner method in the base's
+    file, an own `new` method, a cycle, a framework base token. Also: base-class fan-out restricted to the dispatching
+    implementer's subclasses, a direct caller keeping the base's fan-out, and an unproven bind that does not walk.
+  - `interfaceSiblings.test.ts` covers `pickInheritedMethod`.
+  - `test:interface-dispatch` uses real C# extraction. Section 6: plain base, generic `RepoBase<T>`, abstract root
+    overridden in the middle. Section 7: the wec.social-ads shape (`PureRepository<T>`, an inheriting implementer, an
+    overriding non-implementer, and an overriding subclass of the implementer).
+  - Section 6 fails at ad5ddd0; section 7 and the fan-out unit case fail at 00eaf6f. All pass with the fix.
+  - `runPolicy.test.ts` covers the v18 generation and the escalation from v17.
