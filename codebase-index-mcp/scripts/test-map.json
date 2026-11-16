@@ -196,13 +196,15 @@
       "codebase-index-mcp/scripts/test/test-field-access-worker.mjs",
       "@dist",
       "codebase-index-mcp/src/tools/handlers/impactHandler.ts",
-      "codebase-index-mcp/src/tools/handlers/searchHandler.ts"
+      "codebase-index-mcp/src/tools/handlers/searchHandler.ts",
+      "codebase-index-mcp/scripts/bundle.mjs"
     ],
     "test:freshness-worker": [
       "codebase-index-mcp/scripts/test/test-freshness-worker.mjs",
       "@dist",
       "codebase-index-mcp/src/tools/handlers/impactHandler.ts",
-      "codebase-index-mcp/src/tools/handlers/searchHandler.ts"
+      "codebase-index-mcp/src/tools/handlers/searchHandler.ts",
+      "codebase-index-mcp/scripts/bundle.mjs"
     ],
     "test:harness-db-isolation": [
       "codebase-index-mcp/scripts/test/test-harness-db-isolation.mjs",
@@ -222,7 +224,8 @@
       "@dist",
       "codebase-index-mcp/src/tools/handlers/impactHandler.ts",
       "codebase-index-mcp/src/tools/handlers/searchHandler.ts",
-      "codebase-index-mcp/src/services/analysis/docSection.ts"
+      "codebase-index-mcp/src/services/analysis/docSection.ts",
+      "codebase-index-mcp/scripts/bundle.mjs"
     ],
     "test:impact-join-parity": [
       "codebase-index-mcp/scripts/test/test-impact-join-parity.mjs",
@@ -235,12 +238,14 @@
     ],
     "test:refresh-deadline": [
       "codebase-index-mcp/scripts/test/test-refresh-deadline.mjs",
-      "@dist"
+      "@dist",
+      "codebase-index-mcp/scripts/bundle.mjs"
     ],
     "test:index-lock-contention": [
       "codebase-index-mcp/scripts/test/test-index-lock-contention.mjs",
       "@dist",
-      "codebase-index-mcp/src/tools/handlers/searchHandler.ts"
+      "codebase-index-mcp/src/tools/handlers/searchHandler.ts",
+      "codebase-index-mcp/scripts/bundle.mjs"
     ],
     "test:interface-dispatch": [
       "codebase-index-mcp/scripts/test/test-interface-dispatch.mjs",
