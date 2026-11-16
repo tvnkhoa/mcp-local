@@ -14,14 +14,17 @@
  *   node scripts/run-servers.mjs smoke --server postgres-mcp
  *   node scripts/run-servers.mjs install             # npm ci in each server
  *   node scripts/run-servers.mjs test --no-lock      # skip the heavy-check lock (CI=true skips it too)
+ *
+ * Stopping this runner stops the server script it is running (SIGINT / SIGTERM / SIGBREAK, exit, the shell
+ * above it killed, or a hard kill through the watchdog): ./lib/childTree.mjs kills the child process tree and frees the lock.
  */
 
-import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import process from "node:process";
 import { fileURLToPath } from "node:url";
 
+import { createChildTracker } from "./lib/childTree.mjs";
 import { holdHeavyLockOrExit } from "./lib/heavyLock.mjs";
 import { SERVERS } from "./lib/manifest.mjs";
 
@@ -48,9 +51,12 @@ if (targets.length === 0) {
 
 const npm = process.platform === "win32" ? "npm.cmd" : "npm";
 
+// Before the lock: the tracker's signal listeners must kill the children before the lock's listener exits.
+const children = createChildTracker({ name: "run-servers" });
+
 // Only the test suites are heavy enough to collide with another session's gate (scripts/lib/heavyLock.mjs).
 if (script === "test") {
-  await holdHeavyLockOrExit({ cmd: `run-servers ${argv.join(" ")}`, noLock: argv.includes("--no-lock") });
+  children.setLock(await holdHeavyLockOrExit({ cmd: `run-servers ${argv.join(" ")}`, noLock: argv.includes("--no-lock") }));
 }
 
 /** `install` is not a package script — it is `npm ci`, with a fallback. */
@@ -85,9 +91,8 @@ for (const server of targets) {
 
   console.log(`\n=== ${server.key}: ${script} ===`);
   const t0 = Date.now();
-  const result = spawnSync(npm, argsFor(server, cwd), {
+  const result = await children.run(npm, argsFor(server, cwd), {
     cwd,
-    stdio: "inherit",
     shell: process.platform === "win32"
   });
   const elapsed = `${((Date.now() - t0) / 1000).toFixed(1)}s`;

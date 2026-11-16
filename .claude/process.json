@@ -103,7 +103,7 @@
           "scripts/run-tests.mjs",
           "--changed",
           "{base?}",
-          "--list"
+          "--mapped-only"
         ],
         "cwd": "codebase-index-mcp",
         "when": {
@@ -112,7 +112,7 @@
             "packages/**"
           ]
         },
-        "note": "Run only the harnesses the diff maps to through scripts/test-map.json: run the scripts `--changed {base?} --list` prints (npm run <name> each), unless it prints the whole suite (a file missing from test-map.json or an unresolvable base falls back to it; run-tests.mjs has no flag that disables that fallback). Never run the whole suite as a member: it runs once at the merge gate."
+        "note": "Runs exactly the harnesses the diff maps to through scripts/test-map.json plus the always-run scripts (--mapped-only; add --list to preview the same selection). A changed file missing from test-map.json is printed as a WARNING and selects nothing: report it (add it to the map in the same row when it is in scope); an unresolvable base exits 2. Exit non-zero only on a harness failure. Never run the whole suite as a member: it runs once at the merge gate."
       },
       {
         "id": "contracts",

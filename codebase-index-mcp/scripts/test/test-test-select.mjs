@@ -1,13 +1,16 @@
 /**
  * `run-tests.mjs --changed` (row V-E): scripts/test-map.json covers every suite script, and the
  * selection over it fails safe — an unmapped change runs the whole suite, an unmapped script always
- * runs, and only `skip` paths (other servers, pure docs) are left out.
+ * runs, and only `skip` paths (other servers, pure docs) are left out. `--mapped-only` (row P1) turns the
+ * whole-suite fallback off: section 8 runs the CLI over a scratch git repo with and without it.
  *
  * Usage: node scripts/test/test-test-select.mjs
  */
 
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -76,6 +79,11 @@ assert.deepEqual(names(r), smallSuite, "never fewer tests on an unmapped change"
 r = pick([]);
 assert.deepEqual(names(r), ["test:unit", "test:unmapped"], "no change: only what always runs");
 
+r = selectForChanges({ changed: ["cim/scripts/test/b.mjs", "scripts/new-thing.mjs"], map: small, suite: smallSuite, mappedOnly: true });
+assert.equal(r.whole, false, "mappedOnly: an uncovered file does not widen the run");
+assert.deepEqual(r.uncovered, ["scripts/new-thing.mjs"], "mappedOnly: the uncovered file is still reported");
+assert.deepEqual(names(r), ["test:unit", "test:b", "test:unmapped"], "mappedOnly: the mapped harnesses plus what always runs");
+
 // 5. The real map: a root script outside the map runs everything; another server's file runs only what always runs.
 const real = (changed) => selectForChanges({ changed, map, suite });
 assert.equal(real(["scripts/some-new-root-script.mjs"]).whole, true, "an unmapped root scripts/ file selects the whole suite");
@@ -121,5 +129,55 @@ assert.ok(lint.some((p) => p.startsWith("test:b: ** is a catch-all")), "a bare *
 assert.ok(lint.some((p) => p.startsWith("test:c: docs/adr/** is shadowed by docs/**")), "a glob a skip rule takes first is refused");
 assert.ok(lint.some((p) => p.startsWith("test:d: cim/src/x.test.ts is shadowed by cim/src/**/*.test.ts")), "a path the unit rule takes first is refused");
 assert.ok(!lint.some((p) => p.startsWith("test:e")), "a narrower directory glob is fine");
+
+// 8. The CLI, end to end: run-tests.mjs --changed <base> --list over a scratch repo (GIT_DIR / GIT_WORK_TREE point
+// git there) whose change touches one mapped file and one unmapped file.
+{
+  const repo = fs.mkdtempSync(path.join(os.tmpdir(), "test-select-"));
+  const env = { ...process.env, GIT_DIR: path.join(repo, ".git"), GIT_WORK_TREE: repo, CI: "true" };
+  const git = (...args) => {
+    const out = spawnSync("git", args, { cwd: repo, env, encoding: "utf8" });
+    assert.equal(out.status, 0, `git ${args.join(" ")}: ${out.stderr}`);
+    return out.stdout.trim();
+  };
+  const write = (rel, text) => {
+    fs.mkdirSync(path.dirname(path.join(repo, rel)), { recursive: true });
+    fs.writeFileSync(path.join(repo, rel), text);
+  };
+  git("init", "-q");
+  write("codebase-index-mcp/scripts/test/test-test-select.mjs", "// base\n");
+  write("scripts/new-thing.mjs", "// base\n");
+  git("add", "codebase-index-mcp/scripts/test/test-test-select.mjs", "scripts/new-thing.mjs");
+  git("-c", "user.name=t", "-c", "user.email=t@example.invalid", "commit", "-q", "-m", "base");
+  const base = git("rev-parse", "HEAD");
+  write("codebase-index-mcp/scripts/test/test-test-select.mjs", "// changed\n");
+  write("scripts/new-thing.mjs", "// changed\n");
+
+  const cli = (...args) => spawnSync(process.execPath, [path.join(ROOT, "scripts", "run-tests.mjs"), ...args], { cwd: ROOT, env, encoding: "utf8" });
+  // The --list block: the lines after "<n> script(s):", minus the (excluded) notes.
+  const listed = (out) => {
+    const lines = out.stdout.split(/\r?\n/);
+    const head = lines.findIndex((l) => /^\d+ script\(s\):$/.test(l));
+    assert.ok(head >= 0, out.stdout);
+    return lines.slice(head + 1).filter((l) => l.startsWith("  ") && !l.includes("(excluded)")).map((l) => l.trim());
+  };
+
+  const whole = cli("--changed", base, "--list");
+  assert.equal(whole.status, 0, whole.stderr);
+  assert.match(whole.stdout, /not in test-map\.json → WHOLE SUITE: scripts\/new-thing\.mjs/);
+  assert.deepEqual(listed(whole), suite, "without --mapped-only the unmapped file still lists the whole suite");
+
+  const mapped = cli("--changed", base, "--mapped-only", "--list");
+  assert.equal(mapped.status, 0, `unmapped files alone exit 0: ${mapped.stderr}`);
+  assert.match(mapped.stderr, /WARNING not in test-map\.json.*scripts\/new-thing\.mjs/, "the unmapped file is a warning");
+  const expected = selectForChanges({ changed: ["codebase-index-mcp/scripts/test/test-test-select.mjs"], map, suite }).selected.map((s) => s.name);
+  assert.deepEqual(listed(mapped), expected, "--mapped-only lists exactly the mapped set plus what always runs");
+  assert.ok(expected.includes("test:test-select") && expected.length < suite.length);
+
+  const badBase = cli("--changed", "no-such-ref", "--mapped-only", "--list");
+  assert.equal(badBase.status, 2, "--mapped-only with a base that does not resolve exits 2, never a silent pass");
+  assert.equal(cli("--mapped-only", "--list").status, 2, "--mapped-only without --changed is a usage error");
+  fs.rmSync(repo, { recursive: true, force: true });
+}
 
 console.log(`test-test-select: all checks passed (${String(suite.length)} suite scripts mapped)`);

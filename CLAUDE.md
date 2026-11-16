@@ -103,8 +103,12 @@ never `npm install` in one (it writes through the junctions).
 
 **The suite runs once per push wave, at the merge gate** (`ci-changed`, single-server and shared alike).
 A row's own gate runs only the harnesses its diff maps to via `codebase-index-mcp/scripts/test-map.json`
-(`node scripts/run-tests.mjs --changed [<base>] --list`, then `npm run <name>` each); the script has no
-flag that disables its whole-suite fallback, so if the list is the whole suite, run the named targets by hand.
+(`node scripts/run-tests.mjs --changed [<base>] --mapped-only` in `codebase-index-mcp/`; add `--list` to preview).
+`--mapped-only` turns off the whole-suite fallback: a changed file missing from the map is printed as a
+warning and runs nothing, an unresolvable base exits 2, and only a harness failure exits non-zero. Without
+the flag, `--changed` still falls back to the whole suite. Stopping a runner (`run-tests.mjs`,
+`scripts/run-servers.mjs`) — a signal, a hard kill, or the shell above it killed — kills its child process
+trees and frees the heavy lock (`scripts/lib/childTree.mjs`).
 A row on a server-thread / worker / lock path also gets a CI run on its branch before accept
 (`gh workflow run CI --ref wt/<name>`, after the owner's yes to push the branch). One `INDEX_VERSION`
 bump per wave, assigned by the leader; never measure on the live served process.
