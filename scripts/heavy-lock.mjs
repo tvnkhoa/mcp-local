@@ -8,7 +8,7 @@
  * gone — e.g. TaskStop killed the shell but not this child). Neither code means the check failed.
  *
  * Usage:
- *   node scripts/heavy-lock.mjs [--no-lock] [--class <name>] [--cost small|large] [--ram-mb <N>] -- <command> [args...]
+ *   node scripts/heavy-lock.mjs [--no-lock] [--class <name>] [--cost small|large] [--ram-mb <N>] [--container-mb <N>] -- <command> [args...]
  *   node scripts/heavy-lock.mjs status [--json]
  *   node scripts/heavy-lock.mjs deploy [--deploy-root <dir>] [--allow-dirty] [--json]
  *
@@ -19,7 +19,8 @@
  * live ticket may take the lock, however often the others poll — or a later one while the oldest has waited
  * < 10 min. Several runs hold it at once while they fit the RAM budget (H-6b, lib/heavyLockBudget.mjs):
  * `--ram-mb N` declares the run's MB (else its class's p95 × 1.5, else 8000 dotnet / 1500 other),
- * `--cost large` makes it exclusive, `--class` names its class (else repo + command).
+ * `--container-mb N` declares the RAM its containers take in the WSL2 VM (used only while its class has
+ * < 3 unshared measured runs), `--cost large` makes it exclusive, `--class` names its class (else repo + command).
  *
  * `status` is read-only (it only removes registry entries of dead waiters and silent tickets): the
  * holder and every waiter in ticket order with its position, each with its repo and Claude session id
@@ -163,7 +164,7 @@ if (argv[0] === "status") {
   process.exit(0);
 }
 const USAGE =
-  "usage: node scripts/heavy-lock.mjs [--no-lock] [--class <name>] [--cost small|large] [--ram-mb <N>] -- <command> [args...]\n" +
+  "usage: node scripts/heavy-lock.mjs [--no-lock] [--class <name>] [--cost small|large] [--ram-mb <N>] [--container-mb <N>] -- <command> [args...]\n" +
   "       node scripts/heavy-lock.mjs status [--json]\n" +
   "       node scripts/heavy-lock.mjs history [--class <name>] [--repo <repo>] [--json]\n" +
   "       node scripts/heavy-lock.mjs deploy [--deploy-root <dir>] [--allow-dirty] [--json]";
@@ -208,13 +209,19 @@ if (ramMb !== null && !(Number.isInteger(ramMb) && ramMb > 0)) {
   console.error(`--ram-mb is a whole number of MB, not ${ramText}\n${USAGE}`);
   process.exit(2);
 }
+const containerText = option(own, "--container-mb");
+const containerMb = containerText === undefined ? null : Number(containerText);
+if (containerMb !== null && !(Number.isInteger(containerMb) && containerMb > 0)) {
+  console.error(`--container-mb is a whole number of MB, not ${containerText}\n${USAGE}`);
+  process.exit(2);
+}
 
 const cmd = command.join(" ");
 const askedAt = Date.now();
 // The sampler's summary file is named before the lock is taken: the slot names it, so later admissions
 // read this run's working set from it.
 const sampleFile = newSampleFile();
-const lock = await holdHeavyLockOrExit({ cmd, noLock: own.includes("--no-lock"), klass, cost: cost ?? null, ramMb, sampleFile });
+const lock = await holdHeavyLockOrExit({ cmd, noLock: own.includes("--no-lock"), klass, cost: cost ?? null, ramMb, containerMb, sampleFile });
 // Measured only when this call holds the lock itself: a nested run is inside its parent's record.
 const startedAt = Date.now();
 const sampler = lock.acquired ? startSampler({ runStart: startedAt, out: sampleFile }) : null;
@@ -248,6 +255,7 @@ if (lock.acquired) {
       class: lock.request?.class ?? klass ?? defaultClass(cmd, repo),
       cost: cost ?? null,
       ramMb,
+      containerDeclaredMb: containerMb,
       declaredMb: lock.request?.declaredMb ?? null,
       declaredFrom: lock.request?.declaredFrom ?? null,
       exclusive: lock.request?.exclusive ?? null,

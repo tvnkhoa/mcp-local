@@ -7,7 +7,7 @@ import test, { after } from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { acquireHeavyLock, formatHeavyLockStatus, heavyLockHoldersDir, heavyLockPipeName, heavyLockStatus, heavyLockWaitersDir, isPidAlive, LOCK_TIMEOUT_EXIT } from "./heavyLock.mjs";
-import { admit, BYPASS_MS, buildRequest, capKey, declaredMb, exclusiveReason, FALLBACK_MB, FLOOR_MB, isDotnet, isHarness, LONE_HEAD_MARGIN_MB, RESERVE_MB } from "./heavyLockBudget.mjs";
+import { admit, BYPASS_MS, buildRequest, capKey, CONTAINER_CLASS_MIN_MB, declaredMb, exclusiveReason, FALLBACK_MB, FLOOR_MB, isContainerClass, isDotnet, isHarness, LONE_HEAD_MARGIN_MB, RESERVE_MB } from "./heavyLockBudget.mjs";
 
 /**
  * H-6b: the RAM-budget semaphore. The rules (heavyLockBudget.mjs) are tested as pure functions; the lock
@@ -109,6 +109,53 @@ test("declared MB: --ram-mb wins; fallback 8000 dotnet / 1500 other under 3 meas
   assert.equal(declaredMb({ klass: "k", rows: rows("k", [100, 200, 300]) }).mb, FLOOR_MB.other, "450 is under the 512 floor");
   assert.equal(declaredMb({ klass: "k", rows: rows("k", [421, 600, 859, 700]) }).mb, Math.ceil(859 * 1.5), "nearest-rank p95 of four is the max");
   assert.equal(declaredMb({ klass: "wecbe-test:T", rows: rows("wecbe-test:T", [5000, 6000, 7000]) }).mb, 10500);
+});
+
+test("containers (row P2): a container class takes p95 over its unshared runs; overlapped rows no longer pull it down", () => {
+  // peakMb of an unshared run already holds its VM growth (heavyLockHistory settlePeak); an overlapped run's is its tree alone.
+  const solo = (peakMb, containerMb, treePeakMb = peakMb - containerMb) => ({ class: "wecbe-test:E2E", peakMb, treePeakMb, containerMb, containerShared: false });
+  const shared = (peakMb, containerMb) => ({ class: "wecbe-test:E2E", peakMb, treePeakMb: peakMb, containerMb, containerShared: true });
+  const rows = [solo(1691, 1050), solo(1180, 542), solo(900, 200), ...Array.from({ length: 10 }, () => shared(640, 300))];
+  assert.equal(isContainerClass(rows), true);
+  const before = declaredMb({ klass: "x", rows: rows.map((r) => ({ ...r, class: "x", containerMb: 0 })) });
+  assert.deepEqual([before.from, before.p95], ["p95", 1691], "no VM growth: the old rule over every row");
+  assert.deepEqual({ ...declaredMb({ klass: "wecbe-test:E2E", rows }) }, { mb: Math.ceil(1691 * 1.5), from: "p95-solo", runs: 3, p95: 1691 });
+  // 33 rows, 30 overlapped at 640: the old rule's nearest-rank p95 would fall to 1180 (rank 32); the new one stays 1691.
+  const many = [...rows, ...Array.from({ length: 20 }, () => shared(640, 300))];
+  assert.equal(declaredMb({ klass: "x", rows: many.map((r) => ({ ...r, class: "x", containerMb: 0 })) }).p95, 1180, "the old rule, diluted");
+  assert.equal(declaredMb({ klass: "wecbe-test:E2E", rows: many }).p95, 1691, "overlapped rows are out of the sample");
+  assert.equal(declaredMb({ klass: "wecbe-test:E2E", rows: many, containerMb: 5000 }).from, "p95-solo", "--container-mb is ignored once 3 unshared runs exist");
+});
+
+test("containers (row P2): a class without VM growth declares exactly as before, shared rows and --container-mb noise aside", () => {
+  const rows = [400, 500, 600, 700].map((peakMb, k) => ({ class: "k", peakMb, treePeakMb: peakMb, containerMb: k === 0 ? CONTAINER_CLASS_MIN_MB - 1 : 3, containerShared: k === 3 }));
+  assert.equal(isContainerClass(rows), false, "growth under the threshold is noise");
+  assert.deepEqual({ ...declaredMb({ klass: "k", rows }) }, { mb: 1050, from: "p95", runs: 4, p95: 700 }, "the overlapped 700 still counts: not a container class");
+  // A container-sized growth only in an OVERLAPPED run does not make a container class (it may be the other holder's).
+  const overlappedOnly = rows.map((r) => (r.containerShared ? { ...r, containerMb: 4000 } : r));
+  assert.deepEqual({ ...declaredMb({ klass: "k", rows: overlappedOnly }) }, { mb: 1050, from: "p95", runs: 4, p95: 700 });
+  // Rows before row 10 (no container fields) are unshared, never a container class.
+  assert.deepEqual({ ...declaredMb({ klass: "k", rows: rows.map(({ class: c, peakMb }) => ({ class: c, peakMb })) }) }, { mb: 1050, from: "p95", runs: 4, p95: 700 });
+});
+
+test("containers (row P2): --container-mb is the fallback while a class has < 3 unshared measured runs", () => {
+  const d = (rows, containerMb, klass = "wecbe-test:IT") => ({ ...declaredMb({ klass, rows, containerMb }) });
+  assert.deepEqual(d([], 1200), { mb: FALLBACK_MB.dotnet + 1200, from: "fallback+container-mb", runs: 0, p95: null });
+  assert.deepEqual(d([], 1200, "aria-ingest-docker"), { mb: FALLBACK_MB.other + 1200, from: "fallback+container-mb", runs: 0, p95: null });
+  assert.deepEqual(d([], null), { mb: FALLBACK_MB.dotnet, from: "fallback", runs: 0, p95: null }, "undeclared: as before");
+  // 4 measured, 2 unshared: tree p95 x 1.5 + the declaration (a solo peak's own VM growth is not counted twice).
+  const rows = [
+    { class: "wecbe-test:IT", peakMb: 2400, treePeakMb: 1400, containerMb: 1000, containerShared: false },
+    { class: "wecbe-test:IT", peakMb: 1300, treePeakMb: 1300, containerMb: 0, containerShared: false },
+    { class: "wecbe-test:IT", peakMb: 1500, treePeakMb: 1500, containerMb: 900, containerShared: true },
+    { class: "wecbe-test:IT", peakMb: 1200, treePeakMb: 1200, containerMb: 0, containerShared: true }
+  ];
+  assert.deepEqual(d(rows, 1200), { mb: Math.ceil(1500 * 1.5) + 1200, from: "tree-p95+container-mb", runs: 4, p95: 1500 });
+  assert.deepEqual(d(rows, null), { mb: Math.ceil(2400 * 1.5), from: "p95", runs: 4, p95: 2400 }, "undeclared: the old rule");
+  assert.equal(d(rows.slice(0, 1), 300).mb, FALLBACK_MB.dotnet + 300, "one measured run: fallback + declaration");
+  assert.equal(d(rows.map((r) => ({ ...r, class: "k" })), 100, "k").mb, Math.ceil(1500 * 1.5) + 100, "a non-dotnet class the same way");
+  assert.deepEqual(d(rows, 1200).mb, buildRequest({ cmd: "x", klass: "wecbe-test:IT", rows, containerMb: 1200 }).declaredMb, "buildRequest passes it on");
+  assert.equal(declaredMb({ klass: "wecbe-test:IT", rows, ramMb: 900, containerMb: 1200 }).mb, 900, "--ram-mb is the whole declaration");
 });
 
 test("exclusive (P3): --cost large, .sln build, Release publish, Docker build, verify:all, a codebase-index run of wec.be; not a csproj build or a harness", () => {
@@ -462,6 +509,14 @@ test("CLI: a run that does not fit exits 75 (the timeout code, unchanged); --ram
   assert.equal(ok.status, 3, "the command's own exit code");
   const row = JSON.parse(fs.readFileSync(`${lockPath}.history.jsonl`, "utf8").trim().split("\n").at(-1));
   assert.deepEqual([row.class, row.declaredMb, row.declaredFrom, row.exclusive, row.admittedSumMb, row.admittedBudgetMb], ["test/cli", 1500, "--ram-mb", false, 1500, 1500]);
+  assert.equal(row.containerDeclaredMb, null);
+  // --container-mb (row P2): validated like --ram-mb; a class with no history declares fallback + N and the row records N.
+  assert.equal(run(["--container-mb", "0", "--", "x"]).status, 2);
+  assert.equal(run(["--container-mb", "--", "x"]).status, 2);
+  const c = run(["--container-mb", "100", "--class", "test/cli-container", "--", process.execPath, "-e", "0"]);
+  assert.equal(c.status, 0, c.stderr);
+  const cRow = JSON.parse(fs.readFileSync(`${lockPath}.history.jsonl`, "utf8").trim().split("\n").at(-1));
+  assert.deepEqual([cRow.class, cRow.containerDeclaredMb, cRow.declaredMb, cRow.declaredFrom], ["test/cli-container", 100, FALLBACK_MB.other + 100, "fallback+container-mb"]);
 });
 
 // ---- review follow-ups (H1, M1, M3) ----

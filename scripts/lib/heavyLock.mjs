@@ -615,7 +615,7 @@ async function takeAdmission(file, pipe, log) {
  * Resolves `{ acquired: true, release, request, admission }` or `{ acquired: false, reason }` when the
  * lock is skipped (CI, `--no-lock`, already held by a parent). Rejects with `HeavyLockTimeoutError` after
  * `timeoutMs`. `env` receives `MCP_HEAVY_LOCK_TOKEN` so children spawned with it inherit the hold.
- * `klass`, `cost`, `ramMb` describe the run (heavyLockBudget.mjs); `sampleFile` is where its sampler
+ * `klass`, `cost`, `ramMb`, `containerMb` describe the run (heavyLockBudget.mjs); `sampleFile` is where its sampler
  * writes, read by later admissions as its working set. Tests only: `readStart` replaces `readPidStart`,
  * `scheme: "file"` forces the file scheme, `request` replaces the built request, `readFree` the free-RAM
  * reading, `readWorkingSetMb` a holder's measured MB, `clock` the time the bypass rule reads.
@@ -633,6 +633,7 @@ export async function acquireHeavyLock({
   klass,
   cost = null,
   ramMb = null,
+  containerMb = null,
   sampleFile = null,
   request: givenRequest,
   readFree = () => readFreeMb(env),
@@ -709,7 +710,7 @@ export async function acquireHeavyLock({
       givenRequest !== undefined
         ? Promise.resolve(givenRequest)
         : repoOf(cwd).then((repo) =>
-            buildRequest({ cmd, klass: klass ?? defaultClass(cmd, repo), cost, ramMb, repo, rows: readHistoryRows(`${file}.history.jsonl`) })
+            buildRequest({ cmd, klass: klass ?? defaultClass(cmd, repo), cost, ramMb, containerMb, repo, rows: readHistoryRows(`${file}.history.jsonl`) })
           );
     [lineage, request] = await Promise.all([boundedLineage(readLineage, Math.min(LINEAGE_READ_TIMEOUT_MS, limit)), building]);
     waiter.update({ lineage, ...request });

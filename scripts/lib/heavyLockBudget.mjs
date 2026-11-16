@@ -13,6 +13,13 @@
  * P2 declared MB = `--ram-mb` | class p95 × 1.5 after ≥ 3 measured runs (floor 512, 2000 for a dotnet
  *            class) | fallback 8000 dotnet, 1500 other. Dotnet = class `wecbe-build:` / `wecbe-test:`,
  *            or class / command containing `dotnet`.
+ *            Containers (row P2, 16 Nov): a CONTAINER class — one with an unshared measured run whose WSL2 VM
+ *            grew ≥ CONTAINER_CLASS_MIN_MB (`containerMb`, heavyLockHistory.mjs) — takes its p95 over its
+ *            unshared runs only (`p95-solo`) once it has ≥ 3: a run that overlapped another holder records
+ *            its tree peak alone (owner, 10 Nov), and those rows would pull the p95 down. With < 3 unshared
+ *            runs, `--container-mb N` (a declaration, like --ram-mb) adds N to the tree p95 × 1.5 (≥ 3
+ *            measured runs, `tree-p95+container-mb`) or to the fallback (`fallback+container-mb`); without
+ *            it the rule is as before. A class that never grew the VM keeps exactly its old value.
  * P3 exclusive (waits for all, blocks all): `--cost large`, a .sln build, a Release publish, a Docker
  *            build, verify:all, a codebase-index run of wec.be.
  * P4 at most 2 harness suites at once (mcp-local run-tests / run-servers test / verify-*); per-repo cap 1
@@ -34,6 +41,8 @@ export const P95_FACTOR = 1.5;
 export const MIN_MEASURED_RUNS = 3;
 export const FLOOR_MB = Object.freeze({ dotnet: 2000, other: 512 });
 export const FALLBACK_MB = Object.freeze({ dotnet: 8000, other: 1500 });
+/** VM growth (MB) in one unshared run that makes its class a container class; below it is noise (≤ 11 MB seen for runs without containers). */
+export const CONTAINER_CLASS_MIN_MB = 128;
 
 /**
  * The class a run is filed under when the caller names none: its repo and its command, each path-like
@@ -111,27 +120,49 @@ export function isHarness(klass, cmd) {
   return /\brun-tests(\.mjs)?\b/.test(text) || /\brun-servers(\.mjs)?\s+test\b/.test(text) || /\bverify[:-][\w:-]+/.test(text);
 }
 
+/** A run that held the lock alone at every sample (its VM growth is in its `peakMb`). Rows before row 10 count as unshared. */
+export const isUnshared = (row) => row.containerShared !== true;
+
+/** Measured rows that make a class a container class (P2): unshared, VM growth ≥ CONTAINER_CLASS_MIN_MB. */
+export function isContainerClass(measuredRows) {
+  return measuredRows.some((r) => isUnshared(r) && Number(r.containerMb) >= CONTAINER_CLASS_MIN_MB);
+}
+
 /**
- * The MB a run declares (P2): `{ mb, from, runs, p95 }`, `from` one of `--ram-mb`, `p95`, `fallback`.
- * `rows` are history rows; only this class's measured ones count.
+ * The MB a run declares (P2): `{ mb, from, runs, p95 }`, `from` one of `--ram-mb`, `p95`, `p95-solo`,
+ * `tree-p95+container-mb`, `fallback`, `fallback+container-mb`. `rows` are history rows; only this
+ * class's measured ones count. `containerMb` is the caller's `--container-mb` (used only while the class
+ * has < 3 unshared measured runs).
  */
-export function declaredMb({ ramMb = null, klass, cmd, rows = [] }) {
+export function declaredMb({ ramMb = null, containerMb = null, klass, cmd, rows = [] }) {
   const dotnet = isDotnet(klass, cmd);
+  const floor = dotnet ? FLOOR_MB.dotnet : FLOOR_MB.other;
   if (Number.isInteger(ramMb) && ramMb > 0) return { mb: ramMb, from: "--ram-mb", runs: null, p95: null };
-  const peaks = rows
-    .filter((r) => r.class === klass && Number.isFinite(r.peakMb))
-    .map((r) => r.peakMb)
-    .sort((a, b) => a - b);
-  if (peaks.length >= MIN_MEASURED_RUNS) {
-    const p95 = percentile(peaks, 95);
-    return { mb: Math.max(dotnet ? FLOOR_MB.dotnet : FLOOR_MB.other, Math.ceil(p95 * P95_FACTOR)), from: "p95", runs: peaks.length, p95 };
+  const mine = rows.filter((r) => r.class === klass && Number.isFinite(r.peakMb));
+  const unshared = mine.filter(isUnshared);
+  const sorted = (values) => values.sort((a, b) => a - b);
+  if (unshared.length >= MIN_MEASURED_RUNS && isContainerClass(mine)) {
+    const p95 = percentile(sorted(unshared.map((r) => r.peakMb)), 95);
+    return { mb: Math.max(floor, Math.ceil(p95 * P95_FACTOR)), from: "p95-solo", runs: unshared.length, p95 };
   }
-  return { mb: dotnet ? FALLBACK_MB.dotnet : FALLBACK_MB.other, from: "fallback", runs: peaks.length, p95: null };
+  const declaredContainer = Number.isInteger(containerMb) && containerMb > 0 && unshared.length < MIN_MEASURED_RUNS;
+  if (mine.length >= MIN_MEASURED_RUNS) {
+    if (declaredContainer) {
+      // The tree alone: a solo run's peakMb may already hold VM growth, and N is the declared container share.
+      const p95 = percentile(sorted(mine.map((r) => (Number.isFinite(r.treePeakMb) ? r.treePeakMb : r.peakMb))), 95);
+      return { mb: Math.max(floor, Math.ceil(p95 * P95_FACTOR) + containerMb), from: "tree-p95+container-mb", runs: mine.length, p95 };
+    }
+    const p95 = percentile(sorted(mine.map((r) => r.peakMb)), 95);
+    return { mb: Math.max(floor, Math.ceil(p95 * P95_FACTOR)), from: "p95", runs: mine.length, p95 };
+  }
+  const fallback = dotnet ? FALLBACK_MB.dotnet : FALLBACK_MB.other;
+  if (declaredContainer) return { mb: fallback + containerMb, from: "fallback+container-mb", runs: mine.length, p95: null };
+  return { mb: fallback, from: "fallback", runs: mine.length, p95: null };
 }
 
 /** Everything admission needs to know about one run. */
-export function buildRequest({ cmd, klass, cost = null, ramMb = null, rows = [], repo = null }) {
-  const declared = declaredMb({ ramMb, klass, cmd, rows });
+export function buildRequest({ cmd, klass, cost = null, ramMb = null, containerMb = null, rows = [], repo = null }) {
+  const declared = declaredMb({ ramMb, containerMb, klass, cmd, rows });
   const exclusiveWhy = exclusiveReason({ cost, klass, cmd });
   return {
     class: klass,

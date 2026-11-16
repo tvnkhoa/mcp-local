@@ -55,7 +55,7 @@ import process from "node:process";
 import { fileURLToPath } from "node:url";
 
 import { heavyLockHoldersDir, heavyLockPath, isPidAlive } from "./heavyLock.mjs";
-import { defaultClass, percentile, readCurrentMb, readHistoryRows } from "./heavyLockBudget.mjs";
+import { declaredMb, defaultClass, isContainerClass, isUnshared, percentile, readCurrentMb, readHistoryRows } from "./heavyLockBudget.mjs";
 
 export { defaultClass, readCurrentMb };
 
@@ -107,7 +107,13 @@ export function readHistory({ env = process.env } = {}) {
   return readHistoryRows(historyPath(env));
 }
 
-/** Per class: `{class, runs, measured, peakMb: {p50, p95, max}, durationS: {p50, p95, max}, failed, last}`, the heaviest p95 first. */
+/**
+ * Per class: `{class, runs, measured, peakMb: {p50, p95, max}, durationS: {p50, p95, max}, failed, last,
+ * declared: {mb, from}, container}`, the heaviest p95 first. `declared` is what the class declares now
+ * without --ram-mb / --container-mb (heavyLockBudget.mjs P2, over ALL rows of the class, not the filtered
+ * ones); `container` is null for a class that never grew the WSL2 VM, else `{unshared, shared, growthMb:
+ * {p50, p95, max}}` over its unshared measured runs.
+ */
 export function summarizeHistory(rows, { klass, repo } = {}) {
   const groups = new Map();
   for (const row of rows) {
@@ -121,6 +127,17 @@ export function summarizeHistory(rows, { klass, repo } = {}) {
     const sorted = values.filter((v) => Number.isFinite(v)).sort((a, b) => a - b);
     return { p50: percentile(sorted, 50), p95: percentile(sorted, 95), max: sorted.at(-1) ?? null };
   };
+  const declaredOf = (name, list) => {
+    const mine = name === "(none)" ? list : rows.filter((r) => r.class === name);
+    const { mb, from } = declaredMb({ klass: name, cmd: list.at(-1)?.cmd ?? "", rows: mine });
+    return { mb, from };
+  };
+  const containerOf = (list) => {
+    const measured = list.filter((r) => Number.isFinite(r.peakMb));
+    if (!isContainerClass(measured)) return null;
+    const unshared = measured.filter(isUnshared);
+    return { unshared: unshared.length, shared: measured.length - unshared.length, growthMb: stats(unshared.map((r) => Number(r.containerMb))) };
+  };
   return [...groups.entries()]
     .map(([name, list]) => ({
       class: name,
@@ -129,7 +146,9 @@ export function summarizeHistory(rows, { klass, repo } = {}) {
       peakMb: stats(list.map((r) => r.peakMb)),
       durationS: stats(list.map((r) => (Number.isFinite(r.durationMs) ? Math.round(r.durationMs / 100) / 10 : NaN))),
       failed: list.filter((r) => r.exit !== 0).length,
-      last: list.map((r) => String(r.at ?? "")).sort().at(-1) ?? null
+      last: list.map((r) => String(r.at ?? "")).sort().at(-1) ?? null,
+      declared: declaredOf(name, list),
+      container: containerOf(list)
     }))
     .sort((a, b) => (b.peakMb.p95 ?? -1) - (a.peakMb.p95 ?? -1) || a.class.localeCompare(b.class));
 }
@@ -144,6 +163,15 @@ export function formatHistory(summary, { file } = {}) {
     lines.push(
       `    ${n(s.peakMb.p50)}/${n(s.peakMb.p95)}/${n(s.peakMb.max)} MB · ${n(s.durationS.p50)}/${n(s.durationS.p95)}/${n(s.durationS.max)} s · ${String(s.runs)} (${String(s.measured)}, ${String(s.failed)} failed) · ${n(s.last)}`
     );
+    if (s.declared !== undefined) {
+      const c = s.container;
+      lines.push(
+        `    declares ${String(s.declared.mb)} MB (${s.declared.from})` +
+          (c === null || c === undefined
+            ? ""
+            : ` · containers: VM growth p50/p95/max ${n(c.growthMb.p50)}/${n(c.growthMb.p95)}/${n(c.growthMb.max)} MB over ${String(c.unshared)} unshared runs, ${String(c.shared)} overlapped`)
+      );
+    }
   }
   return lines.join("\n");
 }

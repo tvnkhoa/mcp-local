@@ -97,6 +97,10 @@ test("summarizeHistory: nearest-rank p50/p95/max per class, unmeasured runs coun
   assert.match(text, /^history: h\.jsonl/);
   assert.match(text, /big\n {4}500\/1000\/1000 MB · 5\/10\/10 s · 11 \(10, 1 failed\) · 2026-11-05T09:00:00Z/);
   assert.match(formatHistory([], {}), /no runs recorded/);
+  // row P2: each class says what it declares now; a class without VM growth has no container line
+  assert.deepEqual(big.declared, { mb: 1500, from: "p95" });
+  assert.equal(big.container, null);
+  assert.match(text, /big\n.*\n {4}declares 1500 MB \(p95\)\n/);
 });
 
 test("CLI: bad --cost / --ram-mb / a flag without its value exit 2 before taking the lock; nested and --no-lock runs record nothing", async () => {
@@ -251,6 +255,18 @@ test("foldSample + settlePeak, sole holder: the VM's growth over the first sampl
   ]);
   assert.equal("soloPeak" in r, false, "the working field is not recorded");
   assert.equal(s.sampling.samples, 3);
+});
+
+test("summarizeHistory (row P2): a container class shows its unshared/overlapped runs, VM growth and the p95-solo declaration", () => {
+  const row = (peakMb, containerMb, containerShared) => ({ class: "wecbe-test:E2E", repo: "wec.be", cmd: "dotnet test", peakMb, treePeakMb: containerShared ? peakMb : peakMb - containerMb, containerMb, containerShared, exit: 0, durationMs: 1000, at: "2026-11-16T00:00:00Z" });
+  const rows = [row(1691, 1050, false), row(1180, 542, false), row(900, 200, false), ...Array.from({ length: 30 }, () => row(640, 300, true))];
+  const [s] = summarizeHistory(rows);
+  assert.deepEqual(s.declared, { mb: Math.ceil(1691 * 1.5), from: "p95-solo" });
+  assert.deepEqual(s.container, { unshared: 3, shared: 30, growthMb: { p50: 542, p95: 1050, max: 1050 } });
+  assert.equal(s.peakMb.p95, 1180, "the raw peak stats still read every row (33 rows: rank 32)");
+  assert.match(formatHistory([s]), /declares 2537 MB \(p95-solo\) · containers: VM growth p50\/p95\/max 542\/1050\/1050 MB over 3 unshared runs, 30 overlapped/);
+  // a --repo filter does not change what the class declares: it reads the class's every row
+  assert.deepEqual(summarizeHistory([...rows, { ...rows[0], repo: "other" }], { repo: "wec.be" })[0].declared.from, "p95-solo");
 });
 
 test("settlePeak, overlap (owner 10 Nov: only when running alone): another holder at any sample keeps peakMb = the tree's; the growth is still recorded", () => {
