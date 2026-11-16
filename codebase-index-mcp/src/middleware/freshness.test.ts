@@ -267,6 +267,29 @@ test("applyFreshness: an exact TypeScript answer scopes the note to its index-de
   assert.equal(nano.coverage, "exact", "nano's bare word too");
 });
 
+test("applyFreshness (B-17): the type-program wait is carried in freshness.waitedMs, with the build named", () => {
+  const building = (): Record<string, unknown> => ({
+    engine: "typescript-language-service",
+    accessesWithheld: true,
+    coverage: { confidence: "gap", engine: "typescript-language-service", knownGaps: ["type program still building for 'A' (4.0 s so far); the build continues in the background."], gaps: [] },
+    typeResolution: { engine: "typescript-language-service", cold: true, totalMs: 4962, roundTripMs: 4962 }
+  });
+  // a fresh index: the block is added, state stays fresh
+  const fresh = applyFreshness(building(), { state: "fresh" }) as { freshness: { state: string; waitedMs: number; reason: string } };
+  assert.equal(fresh.freshness.state, "fresh");
+  assert.equal(fresh.freshness.waitedMs, 4962);
+  assert.match(fresh.freshness.reason, /type program, which is still building/);
+  // a refreshing index: the gate's wait (here 3) and the worker's add up; both reasons stay
+  const refreshing = applyFreshness(building(), { state: "refreshing", mode: "dirty", waitedMs: 3, reason: "a dirty re-index is running" }) as { freshness: { state: string; waitedMs: number; reason: string } };
+  assert.equal(refreshing.freshness.state, "refreshing");
+  assert.equal(refreshing.freshness.waitedMs, 4965);
+  assert.match(refreshing.freshness.reason, /a dirty re-index is running; waited 4962 ms/);
+  // a warm answer, or any other engine, is untouched
+  const warm = { engine: "typescript-language-service", coverage: { confidence: "exact", knownGaps: [] }, typeResolution: { cold: false, roundTripMs: 40 } };
+  assert.deepEqual(applyFreshness(warm, { state: "fresh" }), warm);
+  assert.deepEqual(applyFreshness({ engine: "graph", typeResolution: { roundTripMs: 5000 } }, { state: "fresh" }), { engine: "graph", typeResolution: { roundTripMs: 5000 } });
+});
+
 test("release F: a process told it must not write over a newer build answers stale and runs nothing", async () => {
   const h = harness({ budgetMs: 1000, autoFinish: true, refuse: "written by a newer build (v7-x)." });
   try {

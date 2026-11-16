@@ -1152,7 +1152,7 @@ confirm a clean tree reports nothing.
 
 ---
 
-### B-17 · Cap the freshness budget below 5 s in shared/http mode — 🔵 OPEN, filed 2026-10-23
+### B-17 · Cap the freshness budget below 5 s in shared/http mode — ✅ DONE 2026-11-16 as a label (owner pick: no budget change), filed 2026-10-23
 
 Found on the R4 rollout (`codebase-index` served over HTTP, `scripts/serve-http.mjs`). The 5 s freshness
 budget lets a read wait on a repo that is refreshing, and one read was measured at **5011 ms** — the
@@ -1165,8 +1165,14 @@ dirty refresh running took 2654 / 207 / 128 / 129 / 128 ms and says `state: refr
 a read on a repo whose first index is still running answers `not_found` in 2–9 ms. **Still open:**
 `find_field_accesses` while the TS type program cold-builds returned in 5016 / 5011 / 5013 / 5013 / 5015 ms
 on every call (the build ran 25+ s), with `freshness.waitedMs` 0 — the wait is labelled only in
-`coverage` (`confidence: gap`, "type program still building"). Awaiting the owner's pick: label the
-worker wait in `freshness`, or lower the default under `--transport http`.
+`coverage` (`confidence: gap`, "type program still building"). **Fixed** (owner pick 16 Nov: label, no
+budget change): `applyFreshness` (`middleware/freshness.ts`) now adds the worker's round trip to
+`freshness.waitedMs` and names the type-program build in `freshness.reason`; on an otherwise fresh
+index it adds the block with `state: fresh`. After, same setup, 5 reads: 5010 / 5017 / 5011 / 5007 /
+5006 ms with `waitedMs` 4963 / 4961 / 4929 / 4912 / 4946 and the reason "waited N ms for the TypeScript
+type program, which is still building; the answer is withheld, retry once it is built"; cases (a) and
+(b) unchanged (a: 2399 / 210 / 191 / 190 / 156 ms, `waitedMs` 1741 / 0 / 0 / 1 / 1; b: 14 / 3 / 3 / 3 / 3 ms).
+The read still takes the 5 s budget on a cold build; it now says so.
 
 **Purpose** Keep a read from sitting at the ceiling, or make it say so when it does.
 
