@@ -3,6 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 
 import { PolicyViolationError } from "../../middleware/errors.js";
+import { projectDir } from "./assemblyFreshness.js";
 
 /**
  * Runs one `dotnet ef` invocation. `efArgs` is the subcommand part only, e.g.
@@ -240,9 +241,14 @@ function efMigrationsList(config: MigrationConfig, connectionString: string): Pr
  * `{id, name, safeName, applied}` entries instead of human/locale-oriented text with an
  * `applied`/`(Pending)` marker — avoids scraping stdout with a regex that can misclassify
  * migrations under a non-English CLI locale or if the marker text/position ever changes.
+ *
+ * `--verbose --prefix-output` make EF name the assembly it loaded ("Using application base",
+ * "Using assembly") on `verbose:` lines beside the `data:` JSON, so the stale-build check
+ * (`assemblyFreshness.ts`) can stat it without assuming any output layout. Split the stdout with
+ * `splitPrefixedOutput`; the verbose lines are never returned to the caller.
  */
 export function efMigrationsListConnected(config: MigrationConfig, connectionString: string): Promise<EfResult> {
-  return runEf(config, ["migrations", "list", "--json"], connectionString);
+  return runEf(config, ["migrations", "list", "--json", "--verbose", "--prefix-output"], connectionString);
 }
 
 export function efMigrationsAdd(config: MigrationConfig, name: string, connectionString: string): Promise<EfResult> {
@@ -305,7 +311,8 @@ export function efDatabaseUpdateTo(config: MigrationConfig, connectionString: st
 
 /** List migration files in the project's Migrations folder (newest first). */
 export function listMigrationFiles(config: MigrationConfig, filterName?: string): string[] {
-  const dir = path.join(config.project, "Migrations");
+  // The project may be named by its .csproj: joining "Migrations" onto the file path found nothing.
+  const dir = path.join(projectDir(config.project), "Migrations");
   let entries: string[];
   try {
     entries = fs.readdirSync(dir);

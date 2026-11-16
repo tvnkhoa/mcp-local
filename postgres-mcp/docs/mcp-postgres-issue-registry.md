@@ -12,7 +12,7 @@ Resolution. Mirrors the format of `codebase-index-mcp/docs/mcp-codebase-index-is
 
 ## Index
 
-**32 entries** — all 32 resolved (some as documented guidance rather than code changes), **0 open**.
+**33 entries** — all 33 resolved (some as documented guidance rather than code changes), **0 open**.
 Statuses are copied from each entry's own `**Status:**` line; the entry is authoritative.
 
 | ID | Title | Status |
@@ -50,6 +50,7 @@ Statuses are copied from each entry's own `**Status:**` line; the entry is autho
 | `PG-DDL-002` | Behind PgBouncer transaction pooling, the migration lock is not exclusive | ✅ mitigated 2026-10-01 (code) — moved sessions refused; the client-side limit is accepted |
 | `PG-REV-002` | Code-review sweep of the DDL and EF migration lanes (4 findings, 4 fixed) | ✅ fixed 2026-10-01 (code) — TRUNCATE bypass closed; rollback preview made honest; blocked enforced; quoted Options |
 | `PG-DDL-003` | `ddl_dry_run` failed a migration that uses an enum value an earlier migration in the plan adds | ✅ fixed 2026-10-05 (code) — reported `skipped` (`ENUM_VALUE_UNCOMMITTED`), with a preview warning |
+| `PG-MIG-010` | The EF lane read a stale `--no-build` assembly: a week-old other-branch build looked like the pending set | ✅ fixed 2026-11-16 (code) — ids compared with the source; status warns, preview/dry run/apply refuse `MIGRATION_ASSEMBLY_STALE` |
 
 > ID prefixes group by area: `ENV` environment resolution · `SEC` safety posture · `DOC`
 > documentation drift · `CMP` compare_environments · `MIG` EF Core migrations · `DIF` data_diff ·
@@ -1464,6 +1465,37 @@ was fixed.
    - The connection string is now split with quotes respected, so a `;` inside a quoted value is
      not a separator. The setting goes inside the quotes, and an unbalanced quote leaves the string
      alone with `applied: false`. Two unit tests cover this.
+
+---
+
+## PG-MIG-010 — the EF lane read a stale `--no-build` assembly: a week-old other-branch build looked like the pending set
+
+**Status:** ✅ fixed 2026-11-16 (code, mcp-local row #9). Covered by `assemblyFreshness.test.ts`, the
+row #9 tests in `migrationHandlers.test.ts`, and `U` in `scripts/migration-flow-test.mjs`.
+
+- **Scenario:** wec.communication-hub, 16 Nov. `migration_status` on `dev` with the checkout on
+  `develop`; the startup project's last build (`artifacts/bin/Web/debug/CommunicationHub.Infrastructure.dll`)
+  was a UAT-branch build from 9 Nov.
+- **Tool/query:** `migration_status` → `migration_preview` → `migration_apply` (EF lane, `dotnet ef … --no-build`).
+- **Expected vs actual:** expected the checkout's pending migrations. Got the UAT branch's consolidated
+  set as pending, and an apply on dev applied 0 of the checkout's migrations. Nothing said the build was old:
+  under `--no-build` the migration list IS the built assembly's content.
+- **Impact:** a plan reviewed and approved for migrations the source does not hold; the real ones silently skipped.
+- **Resolution:** `services/migration/assemblyFreshness.ts`. `migrations list` runs with
+  `--verbose --prefix-output`; the `data:` lines are the JSON, and the `verbose:` lines name the assembly EF
+  loaded (`Using application base` + `Using assembly`, else the logged `--assembly` argument), so no output
+  layout is assumed. Verbose lines are never returned or logged. Then:
+  - **ids differ** (a source `Migrations/**/<14 digits>_<Name>.cs` the assembly does not list, or an assembly id
+    with no source file; `*.Designer.cs` and the ModelSnapshot are not sources) → `stale`: `migration_status`
+    returns an `assembly` block with the warning and the remedy (build the startup project); `migration_preview`,
+    `migration_dry_run` and `migration_apply` refuse with `MIGRATION_ASSEMBLY_STALE`.
+  - **ids equal, newest migration source newer than the dll** → `possibly_stale`: a warning on status, preview and
+    dry run, never a refusal — a branch switch rewrites file times with identical content.
+  - **fresh**, or **no Migrations folder** → the output is unchanged (no `assembly` field).
+  The server still never builds.
+- **Found on the way:** `listMigrationFiles` (`migration_add`'s `generatedFiles`) joined `Migrations` onto
+  `POSTGRES_MIGRATION_DOTNET_PROJECT` as given; configured as a `.csproj` path that found nothing. It now uses the
+  project's folder.
 
 ---
 

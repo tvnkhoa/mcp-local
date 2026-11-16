@@ -28,6 +28,13 @@ import {
   type MigrationConfig
 } from "../../services/migration/efRunner.js";
 import { captureSchema, diffSnapshots } from "../../services/migration/schemaSnapshot.js";
+import {
+  assertAssemblyFresh,
+  checkAssemblyFreshness,
+  freshnessWarning,
+  splitPrefixedOutput,
+  type AssemblyFreshness
+} from "../../services/migration/assemblyFreshness.js";
 
 interface MigrationPreviewRecord {
   previewId: string;
@@ -187,19 +194,29 @@ interface EfMigrationListEntry {
  */
 async function listMigrations(
   config: MigrationConfig,
-  connectionString: string
-): Promise<{ raw: string; entries: EfMigrationListEntry[]; applied: string[]; pending: string[] }> {
-  const result = efOk(await efMigrationsListConnected(config, connectionString), "migrations list");
+  connectionString: string,
+  stale: "warn" | "refuse"
+): Promise<{ raw: string; entries: EfMigrationListEntry[]; applied: string[]; pending: string[]; freshness: AssemblyFreshness }> {
+  const listed = await efMigrationsListConnected(config, connectionString);
+  const output = splitPrefixedOutput(listed.stdout);
+  // A failure message carries stderr or the data lines, never the verbose log.
+  const result = efOk({ ...listed, stdout: output.data }, "migrations list");
   let entries: EfMigrationListEntry[];
   try {
-    entries = JSON.parse(result.stdout);
+    entries = JSON.parse(output.data);
   } catch (error) {
     throw new PolicyViolationError(
       "EF_OUTPUT_UNPARSEABLE",
       `Failed to parse 'dotnet ef migrations list --json' output as JSON: ${String(error)}`
     );
   }
+  // --no-build: the list is the built assembly's content. Compare it with the source (row #9).
+  const freshness = checkAssemblyFreshness(config.project, entries.map((m) => m.id), output.verbose);
+  if (stale === "refuse") {
+    assertAssemblyFresh(freshness);
+  }
   return {
+    freshness,
     raw: result.stdout.trim(),
     entries, // EF returns migrations in apply order — callers rely on this to detect a contiguous pending suffix
     applied: entries.filter((m) => m.applied === true).map((m) => m.id),
@@ -214,13 +231,15 @@ export async function handleMigrationStatus(
 ): Promise<CallToolResult> {
   assertMigrationEnabled(config);
   const env = connections.getEnvironment(args.environment);
-  const { raw, applied, pending } = await listMigrations(config, env.connectionString);
+  const { raw, applied, pending, freshness } = await listMigrations(config, env.connectionString, "warn");
 
   return asText(
     {
       environment: env.name,
       appliedCount: applied.length,
       pendingCount: pending.length,
+      // Present only when the built assembly does not match the source; absent when fresh.
+      assembly: freshnessWarning(freshness),
       applied,
       pending,
       // Redundant with applied[]/pending[] (same ids + name/safeName/applied per entry); scales with
@@ -330,10 +349,16 @@ export async function handleMigrationPreview(
   // run them together. `entries` is in EF apply order; the connected list is what tells us which
   // migrations are actually pending on THIS DB (the idempotent script's IF NOT EXISTS guards
   // only decide that at runtime).
-  const [preSnapshot, listing] = await Promise.all([
+  // allSettled, then the listing's error first: a stale build (MIGRATION_ASSEMBLY_STALE) is the
+  // answer even when the schema round-trip fails too.
+  const [snapshotResult, listingResult] = await Promise.allSettled([
     captureSchema(pool),
-    listMigrations(config, env.connectionString)
+    listMigrations(config, env.connectionString, "refuse")
   ]);
+  if (listingResult.status === "rejected") throw listingResult.reason;
+  if (snapshotResult.status === "rejected") throw snapshotResult.reason;
+  const preSnapshot = snapshotResult.value;
+  const listing = listingResult.value;
   const { entries, pending, applied } = listing;
 
   if (args.targetMigration !== undefined) {
@@ -380,6 +405,8 @@ export async function handleMigrationPreview(
       // a forward migration deserves the same second look the DDL lane gives it.
       risks: lintEfScript(pendingScript),
       lockTimeout: describeLockTimeout(env.connectionString, config),
+      // A stale build refused above; this is only ever the possibly_stale warning (file times).
+      assembly: freshnessWarning(listing.freshness),
       expiresAt
     },
     profile
@@ -542,7 +569,7 @@ export async function handleMigrationApply(
       //     miss it and `dotnet ef database update` would apply migrations that were never previewed.
       const [preSnapshot, current] = await Promise.all([
         captureSchema(pool),
-        listMigrations(config, env.connectionString)
+        listMigrations(config, env.connectionString, "refuse")
       ]);
       if (preSnapshot.snapshotId !== preview.preSnapshotId) {
         throw new PolicyViolationError(
@@ -641,7 +668,7 @@ export async function handleMigrationDryRun(
   const env = connections.getEnvironment(args.environment, true);
   const pool = connections.getPool(args.environment, true);
 
-  const { entries, pending } = await listMigrations(config, env.connectionString);
+  const { entries, pending, freshness } = await listMigrations(config, env.connectionString, "refuse");
   if (pending.length === 0) {
     return asText({ environment: env.name, status: "no_pending", note: "No pending migrations." }, profile);
   }
@@ -657,6 +684,7 @@ export async function handleMigrationDryRun(
     environment: env.name,
     pendingMigrations: pending,
     lockTimeoutMs: config.lockTimeoutMs,
+    assembly: freshnessWarning(freshness),
     script: contiguous ? "delta" : "idempotent",
     statements: run.length + skipped.length,
     skipped: skipped.filter((s) => s.reason === "NON_TRANSACTIONAL"),

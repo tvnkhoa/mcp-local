@@ -15,6 +15,9 @@
  * skip without Docker, under `smoke`. Needs a build first, because it imports `dist/`.
  */
 import { spawnSync } from "node:child_process";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import process from "node:process";
 
 import pg from "pg";
@@ -421,6 +424,37 @@ async function main() {
         "N/lock-timeout-reported",
         p.lockTimeout?.ms === 1000 && p.lockTimeout?.applied === false && /URI/.test(p.lockTimeout?.note ?? ""),
         `lockTimeout=${JSON.stringify(p.lockTimeout)}`
+      );
+    }
+
+    // ── U. a build older than the source: status warns, dry run and apply refuse (row #9) ──
+    {
+      // The preview is made while the build matches. Then the checkout gains a migration the
+      // assembly (the fake's list) does not hold — what a branch switch without a rebuild does.
+      ef.state.migrations.push({ id: "20260110500000_AddS", sql: "CREATE TABLE s_t (id int primary key);" });
+      const { payload: p } = await preview();
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), "mig-flow-stale-"));
+      fs.mkdirSync(path.join(dir, "Migrations"));
+      for (const id of [...ef.state.migrations.map((m) => m.id), "20260110600000_NotBuilt"]) {
+        fs.writeFileSync(path.join(dir, "Migrations", `${id}.cs`), "// fixture\n");
+      }
+      const realProject = config.project;
+      config.project = path.join(dir, "Infrastructure.csproj");
+      const before = ef.state.updateCalls;
+      const s = (await status()).payload;
+      const d = await invoke("handleMigrationDryRun", { environment: "dev" });
+      const a = await apply(p);
+      config.project = realProject;
+      ef.state.migrations.pop();
+      fs.rmSync(dir, { recursive: true, force: true });
+      check(
+        "U/stale-assembly-refuses",
+        s.assembly?.status === "stale" &&
+          JSON.stringify(s.assembly?.missingFromAssembly) === JSON.stringify(["20260110600000_NotBuilt"]) &&
+          d.isError && d.payload.code === "MIGRATION_ASSEMBLY_STALE" &&
+          a.isError && a.payload.code === "MIGRATION_ASSEMBLY_STALE" &&
+          ef.state.updateCalls === before,
+        `status=${String(s.assembly?.status)} dryRun=${String(d.payload.code)} apply=${String(a.payload.code)} updateRan=${String(ef.state.updateCalls !== before)}`
       );
     }
 

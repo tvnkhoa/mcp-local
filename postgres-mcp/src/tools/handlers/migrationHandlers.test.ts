@@ -6,12 +6,15 @@
  */
 
 import assert from "node:assert/strict";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import process from "node:process";
 import { test } from "node:test";
 
 import { ConnectionManager } from "../../repositories/connectionManager.js";
 import { buildEfArgv, type EfResult, type MigrationConfig } from "../../services/migration/efRunner.js";
-import { handleMigrationAdd, handleMigrationStatus, planEfDryRun } from "./migrationHandlers.js";
+import { handleMigrationAdd, handleMigrationDryRun, handleMigrationPreview, handleMigrationStatus, planEfDryRun } from "./migrationHandlers.js";
 
 process.env.POSTGRES_CONNECTION = "postgres://t:t@127.0.0.1:59999/t";
 delete process.env.POSTGRES_ALLOWED_ENVIRONMENTS;
@@ -79,7 +82,7 @@ test("migration_status splits on the structured applied flag, never on the name"
   const body = payload(await handleMigrationStatus({}, connections(), config));
   assert.deepEqual(body.applied, ["20260101000000_Init", "20260102000000_PendingCleanup"]);
   assert.deepEqual(body.pending, ["20260103000000_AddFoo", "20260104000000_Odd"]);
-  assert.deepEqual(calls, [["migrations", "list", "--json"]]);
+  assert.deepEqual(calls, [["migrations", "list", "--json", "--verbose", "--prefix-output"]]);
   assert.equal(body.raw, undefined, "raw is verbose-only (PG-STA-001)");
 });
 
@@ -151,4 +154,86 @@ test("statements Postgres refuses inside a transaction are skipped and reported,
 test("a script the tokenizer cannot follow is refused with a stable code", () => {
   const result = planEfDryRun("CREATE TABLE t (a text DEFAULT 'never closed);");
   assert.equal(result.ok ? "" : result.error.code, "EF_SCRIPT_UNSPLITTABLE");
+});
+
+// ── row #9: a stale --no-build assembly ────────────────────────────────────────
+
+const LISTED = ["20260101000000_Init", "20260102000000_AddA"];
+
+/**
+ * A project dir with Migrations/<id>.cs for `sourceIds`, a fake built assembly, and a runner that
+ * answers `migrations list` the way EF does with --verbose --prefix-output: verbose lines naming the
+ * assembly (and a line carrying a connection string, which must never reach the response), then
+ * the JSON on data: lines, `LISTED` all pending.
+ */
+function staleFixture(t: { after: (fn: () => void) => void }, sourceIds: string[], times: { sourceMs: number; dllMs: number }) {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "mig-stale-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  fs.mkdirSync(path.join(root, "Infra", "Migrations"), { recursive: true });
+  for (const id of sourceIds) {
+    const file = path.join(root, "Infra", "Migrations", `${id}.cs`);
+    fs.writeFileSync(file, "// fixture\n");
+    fs.utimesSync(file, times.sourceMs / 1000, times.sourceMs / 1000);
+  }
+  const bin = path.join(root, "bin");
+  fs.mkdirSync(bin);
+  fs.writeFileSync(path.join(bin, "Acme.Infra.dll"), "MZ");
+  fs.utimesSync(path.join(bin, "Acme.Infra.dll"), times.dllMs / 1000, times.dllMs / 1000);
+  const json = JSON.stringify(LISTED.map((id) => ({ id, name: id, safeName: id, applied: false })), null, 2);
+  const stdout = [
+    "verbose: Using project 'x'.",
+    "verbose: Host=secret-host;Password=SECRET_PW",
+    "verbose: Using assembly 'Acme.Infra'.",
+    `verbose: Using application base '${bin}'.`,
+    ...json.split("\n").map((l) => `data:    ${l}`)
+  ].join("\r\n");
+  const f = fake(() => ok(stdout));
+  f.config.project = path.join(root, "Infra", "Infra.csproj");
+  return f;
+}
+
+const OLD = Date.UTC(2026, 10, 9);
+const NEW = Date.UTC(2026, 10, 16);
+
+test("fresh build: status output is unchanged (no assembly field), prefixed JSON parsed", async (t) => {
+  const { config } = staleFixture(t, LISTED, { sourceMs: OLD, dllMs: NEW });
+  const body = payload(await handleMigrationStatus({ profile: "verbose" }, connections(), config));
+  assert.equal(body.assembly, undefined);
+  assert.deepEqual(body.pending, LISTED);
+  assert.doesNotMatch(JSON.stringify(body), /SECRET_PW|secret-host/, "verbose lines never reach the response");
+});
+
+test("no Migrations folder: status output is unchanged", async () => {
+  const { config } = fake(() => ok(JSON.stringify([{ id: LISTED[0], name: "Init", safeName: "Init", applied: true }])));
+  const body = payload(await handleMigrationStatus({}, connections(), config));
+  assert.equal(body.assembly, undefined);
+});
+
+test("source id missing from the assembly: status warns stale; preview and dry run refuse", async (t) => {
+  const { config } = staleFixture(t, [...LISTED, "20261116000000_AddNew"], { sourceMs: OLD, dllMs: NEW });
+  const body = payload(await handleMigrationStatus({}, connections(), config));
+  const asm = body.assembly as { status: string; missingFromAssembly: string[]; warning: string; remedy: string };
+  assert.equal(asm.status, "stale");
+  assert.deepEqual(asm.missingFromAssembly, ["20261116000000_AddNew"]);
+  assert.match(asm.warning, /STALE BUILD/);
+  assert.match(asm.remedy, /startup project/);
+  assert.doesNotMatch(JSON.stringify(body), /SECRET_PW/);
+  assert.equal(await codeOf(handleMigrationPreview({}, connections(), config)), "MIGRATION_ASSEMBLY_STALE");
+  assert.equal(await codeOf(handleMigrationDryRun({}, connections(), config)), "MIGRATION_ASSEMBLY_STALE");
+});
+
+test("assembly id with no source file: refuses as well", async (t) => {
+  const { config } = staleFixture(t, [LISTED[0] as string], { sourceMs: OLD, dllMs: NEW });
+  const asm = payload(await handleMigrationStatus({}, connections(), config)).assembly as { status: string; missingFromSource: string[] };
+  assert.equal(asm.status, "stale");
+  assert.deepEqual(asm.missingFromSource, [LISTED[1]]);
+  assert.equal(await codeOf(handleMigrationDryRun({}, connections(), config)), "MIGRATION_ASSEMBLY_STALE");
+});
+
+test("branch switch (source newer, ids equal): status warns possibly_stale; dry run is not refused for it", async (t) => {
+  const { config } = staleFixture(t, LISTED, { sourceMs: NEW, dllMs: OLD });
+  const asm = payload(await handleMigrationStatus({}, connections(), config)).assembly as { status: string };
+  assert.equal(asm.status, "possibly_stale");
+  // It gets past the freshness check and fails later, on the fake's missing script / the dead port.
+  assert.notEqual(await codeOf(handleMigrationDryRun({}, connections(), config)), "MIGRATION_ASSEMBLY_STALE");
 });
