@@ -15,7 +15,7 @@ Then **B-14 was filed and the backlog reopened.** It is a P1 because the TypeScr
 merely incomplete but *wrong*: 77% of the TypeScript edges in this repository's own graph pointed at
 a symbol that did not exist. The reason it went unseen for so long is structural and worth stating —
 all 59 issues in the registry were filed from a single C# repository, so no gate and no reporter had
-ever looked at TS. Nine sub-items are closed; four remain.
+ever looked at TS. Nine sub-items are closed; the four that remained were split out on 2026-11-16 into B-18, B-19 and B-20, and B-14 is closed.
 
 Previously refreshed 2026-08-03, twice: once against the working tree, then again after a full
 repository review closed most of what was left. B-13 was filed and closed after that refresh
@@ -76,7 +76,7 @@ Two additions the migration learned and this backlog adopts:
 
 ## P1 — A tool reports something untrue
 
-### B-14 · Make the TypeScript lane tell the truth — 🔵 IN PROGRESS, opened 2026-08-18
+### B-14 · Make the TypeScript lane tell the truth — ✅ DONE 2026-11-16 for B-14.1–.8 and .10 (`b969c3a`); B-14.9, .11, .12, .13 split into B-18, B-19, B-20 by owner decision (opened 2026-08-18)
 
 **Why this exists at all.** Every one of the 59 entries in
 `codebase-index-mcp/docs/mcp-codebase-index-issue-registry.md` was filed from one C# repository. No
@@ -197,18 +197,12 @@ quietly folded in:
 Each has a regression test: `test:typescript-edges` for the first, third and fifth,
 `moduleResolution.test.ts` for the second and fourth.
 
-**Still open.**
+**Split out, 2026-11-16** (owner: close B-14, file three new items). Nothing below is a "tell the truth"
+defect any more — the orphan-`fromId` rate is 0 — so each is its own item:
 
-- **B-14.9** — qualified callee tokens (`callee:Recv.Member`) via a TS scope-type map. Needs to land
-  with the resolver support that reads them, or `resolvedCallEdgePct` drops on the way in.
-- **B-14.11** — per-name import bindings. Import *scoping* is in; per-name binding would close the
-  remaining 14 unresolved tokens, all local closures.
-- **B-14.12** — framework awareness (Fastify/pg-boss entry points, Zod contracts) and a TS
-  dead-code suppression policy. Today `dead_code_scan` runs for TS with **no** suppression at all:
-  every C# rule short-circuits on `language !== "csharp"`, so barrel re-exports and default exports
-  read as dead.
-- **B-14.13** — a TS owner prover, so `change_value_representation` and guarded
-  `refactor_symbol_migration` work on TypeScript rather than being blocked at `unknown`.
+- **B-14.9 and B-14.11** → **B-18** (resolver precision).
+- **B-14.12** → **B-19** (framework awareness and TS dead-code suppression).
+- **B-14.13** → **B-20** (TS owner prover).
 
 ### B-13 · Give `findOwnerType` a real owner, so `requiredOwnerType` can guard a migration — ✅ DONE 2026-08-05
 
@@ -507,6 +501,75 @@ per tool, in the migration's replay style.
 ---
 
 ## P2 — A gate that does not bite
+
+### B-18 · TypeScript call-resolver precision: qualified callee tokens and per-name import bindings — 🔵 OPEN, split from B-14.9 and B-14.11 2026-11-16
+
+**Purpose** Make the TS resolver bind `recv.member()` and imported names to the declaration they name.
+
+**Why** `CALLS` tokens qualified with a receiver are **0 of 2413** in this repo's TS graph, and
+`benchmark:plan:check` `resolvedCallEdgePct` sits at 99.22 (floor 90) because 14 tokens — all local
+closures — cannot be bound without per-name import bindings.
+
+**Proposal** (1) B-14.9: emit `callee:Recv.Member` via a TS scope-type map; it must land together with
+the resolver support that reads it, or `resolvedCallEdgePct` drops on the way in. (2) B-14.11: per-name
+import bindings (import *scoping* is already in, B-14.10).
+
+**Files affected** the TypeScript extractor and `codebase-index-mcp/src/services/` call resolution.
+
+**Risk** — **Med.** Edge counts move; diff them on a real TS repo before and after.
+
+**Rollback** — R2.
+
+**Validation** `test:typescript-edges`; `benchmark:plan:check` not below 99.22; qualified tokens > 0.
+
+**Complexity** — **M**
+
+---
+
+### B-19 · TypeScript framework awareness and dead-code suppression — 🔵 OPEN, split from B-14.12 2026-11-16
+
+**Purpose** Stop `dead_code_scan` reporting live TS code as dead, and see the entry points frameworks wire.
+
+**Why** `dead_code_scan` runs for TS with **no** suppression: every C# rule short-circuits on
+`language !== "csharp"`, so barrel re-exports and default exports read as dead. Fastify and pg-boss
+entry points and Zod contracts are not recognised.
+
+**Proposal** A TS dead-code suppression policy (barrel re-exports, default exports) plus Fastify/pg-boss
+entry-point and Zod-contract awareness.
+
+**Files affected** the `dead_code_scan` service and the TS extractor.
+
+**Risk** — **Low.** Read-only analysis; false positives drop.
+
+**Rollback** — R1.
+
+**Validation** `dead_code_scan` on this repo's TS: barrel and default exports no longer listed.
+
+**Complexity** — **M**
+
+---
+
+### B-20 · A TypeScript owner prover for guarded migrations — 🔵 OPEN, split from B-14.13 2026-11-16
+
+**Purpose** Let `change_value_representation` and guarded `refactor_symbol_migration` work on TypeScript.
+
+**Why** They are blocked at owner `unknown` for TS because the C# AST owner prover (B-13) has no TS
+counterpart; MCP-ISSUE-073 records it. `19676fd`'s TS LanguageService is the likely basis.
+
+**Proposal** Prove the owner of a TS receiver through the LanguageService, as B-13 does from the C# AST,
+and refuse (not guess) when it cannot.
+
+**Files affected** `codebase-index-mcp/src/services/refactor/refactorUtils.ts` and the TS LanguageService lane.
+
+**Risk** — **Med.** A wrong owner would rewrite the wrong sites; mirror B-13's refusal behaviour.
+
+**Rollback** — R2.
+
+**Validation** `requiredOwnerType` matches on a TS fixture and on a real TS repo; mismatches refuse.
+
+**Complexity** — **M**
+
+---
 
 ### B-16 · The raw-SQL DDL lane: what is left after it shipped — 🔵 OPEN, filed 2026-10-01
 
@@ -1096,6 +1159,15 @@ budget lets a read wait on a repo that is refreshing, and one read was measured 
 ceiling itself — on such a repo. Over HTTP every session shares the one refresh worker, so another
 session's refresh can put a read there; the result does not say it waited.
 
+**Measured 2026-11-16** (`5a0fa63`, stdio, scratch 1500-file repos, budget 5000 ms, 5 reads per case).
+IX-B (12 Nov) resolved the freshness-gate wait: a `search_symbols` on a repo with a previous index and a
+dirty refresh running took 2654 / 207 / 128 / 129 / 128 ms and says `state: refreshing` with `waitedMs`;
+a read on a repo whose first index is still running answers `not_found` in 2–9 ms. **Still open:**
+`find_field_accesses` while the TS type program cold-builds returned in 5016 / 5011 / 5013 / 5013 / 5015 ms
+on every call (the build ran 25+ s), with `freshness.waitedMs` 0 — the wait is labelled only in
+`coverage` (`confidence: gap`, "type program still building"). Awaiting the owner's pick: label the
+worker wait in `freshness`, or lower the default under `--transport http`.
+
 **Purpose** Keep a read from sitting at the ceiling, or make it say so when it does.
 
 **Why** An agent cannot tell a 5 s read that was slow from one that was freshness-bound, and a client
@@ -1191,6 +1263,8 @@ B-13                 ✅ closed 2026-08-05 — filed after this section was writ
 B-15  independent of everything else. B-15.3 (the runner seam) first: it is what lets the
       other four be tested at all
 B-16  independent; B-16.1 (PgBouncer) is the one with a correctness consequence
+B-14  ✅ closed 2026-11-16 — its open sub-items are B-18 (.9 + .11), B-19 (.12), B-20 (.13);
+      none blocks another. B-18 first: it moves edge counts, so it should land before B-19/B-20 measure.
 ```
 
 **Suggested next slice:** nothing here is blocking. B-04 closes on its own once four more CI runs
@@ -1217,7 +1291,10 @@ tell the truth, or makes an existing gate capable of failing.
 
 | # | Item | Tier | Risk | Rev. | Complexity | Status |
 |---|---|---|---|---|---|---|
-| B-14 | The TypeScript lane reports a graph that is 77% dangling | P1 | **High** | R2 | L / extractor | 🔵 9 of 13 done 2026-08-18 · orphan `fromId` 77.0% → 0; edge types 2 → 7 |
+| B-14 | The TypeScript lane reports a graph that is 77% dangling | P1 | **High** | R2 | L / extractor | ✅ 2026-11-16 · .1–.8, .10 done (`b969c3a`); orphan `fromId` 77.0% → 0; edge types 2 → 7; rest split to B-18/19/20 |
+| B-18 | TS call resolver: qualified callee tokens + per-name import bindings (B-14.9, .11) | P2 | **Med** | R2 | M | 🔵 open, filed 2026-11-16 |
+| B-19 | TS framework awareness + `dead_code_scan` suppression (B-14.12) | P2 | Low | R1 | M | 🔵 open, filed 2026-11-16 |
+| B-20 | TS owner prover for guarded migrations (B-14.13, MCP-ISSUE-073) | P2 | **Med** | R2 | M | 🔵 open, filed 2026-11-16 |
 | B-16 | The DDL lane's known gaps after it shipped | P2 | **Med** | R1 | S each | 🔵 16.1 mitigated (PG-DDL-002) · 16.2 deferred · 16.3 blocked on network · 16.4–16.6 accepted |
 | B-15 | The EF Core lane lacks lock_timeout, delta dry run, tests, rollback, cross-process lock | P2 | **Med** | R1 | M | ✅ 2026-10-01 · all 5 · found and fixed PG-MIG-007/008/009 on the way; migration-flow harness 0 → 20 scenarios |
 | B-13 | `findOwnerType` returns the enclosing class, not the owner | P1 | **Med** | R2 | M / AST | ✅ 2026-08-05 · AST prover; `requiredOwnerType` matches 3 of 3 |
