@@ -30,7 +30,8 @@ export const ENTRIES = {
   index: "index.js",
   refreshWorker: "services/indexing/refreshWorker.js",
   extractionWorker: "services/extractors/extractionWorker.js",
-  fieldWorker: "services/typeResolution/fieldWorker.js"
+  fieldWorker: "services/typeResolution/fieldWorker.js",
+  vectorSearchWorker: "repositories/vectorSearchWorker.js"
 };
 
 export const EXTERNAL = [

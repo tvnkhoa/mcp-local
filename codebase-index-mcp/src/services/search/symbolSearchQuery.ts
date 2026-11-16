@@ -9,7 +9,7 @@
 
 import type Database from "better-sqlite3";
 import type { SymbolRecord } from "../../types/index.js";
-import { vectorSearchSymbols, isVectorEnabled } from "../../repositories/vectorStore.js";
+import { isVectorEnabled } from "../../repositories/vectorStore.js";
 import { buildFtsQuery, buildIntentFtsQuery, extractIntentTokens } from "./symbolSearchFts.js";
 
 /**
@@ -112,42 +112,9 @@ export function searchSymbolsImpl(
       )
       .all(ftsQuery, ...params, limit) as (SymbolRecord & { repoPath: string | null })[];
 
-    // Hybrid: if FTS returns few results and vector is available, augment with vector search.
-    //
-    // MCP-ISSUE-058(b): this padding is why `search_symbols(query:"ManualOutboundHandler",
-    // strategy:"name")` answered `count: 50` for a symbol that does not exist in the repo —
-    // `GlobalCRCOutBoundHandler`, `GlobalInBoundHandler`, `ExportOutboundAsync` and 47 more, all
-    // vector neighbours, none a name match, and the whole set reported at `confidence: "high"` with
-    // `knownGaps: []`. The padding is worth keeping (it rescues a near-miss spelling), but it must be
-    // LABELLED, so a caller can tell "here are five things a bit like it" from "here it is".
-    if (ftsResults.length < 3 && isVectorEnabled() && repoId) {
-      const vecResults = vectorSearchSymbols(db, repoId, query, limit);
-      const seen = new Set(ftsResults.map((r) => r.symbolId));
-      for (const vr of vecResults) {
-        if (ftsResults.length >= limit) break;
-        if (seen.has(vr.symbolId)) continue;
-        const sym = db.prepare(`
-          select
-            s.repo_id as repoId,
-            s.symbol_id as symbolId,
-            s.file_path as filePath,
-            s.name,
-            s.kind,
-            s.line,
-            s.signature,
-            r.repo_path as repoPath
-          from symbols s
-          inner join repositories r on r.repo_id = s.repo_id
-          where s.repo_id = ? and s.symbol_id = ?
-          limit 1
-        `).get(repoId, vr.symbolId) as (SymbolRecord & { repoPath: string | null }) | undefined;
-        if (sym) {
-          ftsResults.push({ ...sym, matchType: "fuzzy" });
-          seen.add(vr.symbolId);
-        }
-      }
-    }
-
+    // Vector near-neighbour padding is NOT done here (MCP-ISSUE-132): its KNN is a brute-force scan that blocked
+    // the server thread 0.3-2.9 s. `search_symbols` asks `needsVectorPadding` and fetches the neighbours from the
+    // vector-search worker (vectorSearchWorkerClient.ts), then `appendVectorNeighbours` adds them here.
     return ftsResults;
   }
 
@@ -191,6 +158,63 @@ export function searchSymbolsImpl(
       `
     )
     .all(...params, limit) as (SymbolRecord & { repoPath: string | null })[];
+}
+
+// ── Vector near-neighbour padding (MCP-ISSUE-132) ─────────────────────
+
+/**
+ * Whether a name search should be padded with vector near-neighbours: fewer than three name matches, one repo, and
+ * vectors on. Only when the symbols_fts table exists — the LIKE fallback never padded.
+ *
+ * MCP-ISSUE-058(b): the padding answered `count: 50` for a symbol that does not exist — all vector neighbours, none
+ * a name match. It is worth keeping (it rescues a near-miss spelling), but LABELLED (`matchType: "fuzzy"`), so a
+ * caller can tell "here are five things a bit like it" from "here it is".
+ */
+export function needsVectorPadding(db: Database.Database, matches: number, repoId: string | null): repoId is string {
+  if (matches >= 3 || !repoId || !isVectorEnabled()) return false;
+  try {
+    db.prepare("select * from symbols_fts limit 0").all();
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** Append the neighbours (already ranked, from the vector-search worker) as `fuzzy` rows, up to `limit` in all. */
+export function appendVectorNeighbours(
+  db: Database.Database,
+  rows: (SymbolRecord & { repoPath: string | null })[],
+  repoId: string,
+  neighbours: readonly { symbolId: string }[],
+  limit: number
+): (SymbolRecord & { repoPath: string | null })[] {
+  const out = [...rows];
+  const seen = new Set(out.map((r) => r.symbolId));
+  const stmt = db.prepare(`
+    select
+      s.repo_id as repoId,
+      s.symbol_id as symbolId,
+      s.file_path as filePath,
+      s.name,
+      s.kind,
+      s.line,
+      s.signature,
+      r.repo_path as repoPath
+    from symbols s
+    inner join repositories r on r.repo_id = s.repo_id
+    where s.repo_id = ? and s.symbol_id = ?
+    limit 1
+  `);
+  for (const vr of neighbours) {
+    if (out.length >= limit) break;
+    if (seen.has(vr.symbolId)) continue;
+    const sym = stmt.get(repoId, vr.symbolId) as (SymbolRecord & { repoPath: string | null }) | undefined;
+    if (sym) {
+      out.push({ ...sym, matchType: "fuzzy" });
+      seen.add(vr.symbolId);
+    }
+  }
+  return out;
 }
 
 // ── getSearchSuggestions ───────────────────────────────────────────────

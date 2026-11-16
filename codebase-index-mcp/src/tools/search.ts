@@ -58,7 +58,7 @@ export function buildSearchTools(deps: CodebaseIndexDeps): AnyToolDefinition[] {
     },
     annotations: readsGraph,
     rawResult: true,
-    handler: (input) => ok(raw(handleSearchSymbols(input, buildContext())))
+    handler: async (input) => ok(raw(await handleSearchSymbols(input, buildContext())))
   });
 
   const searchRegex = defineTool({

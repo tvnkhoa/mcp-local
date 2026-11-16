@@ -9,10 +9,9 @@
  *     gate (a refresh run + its bookkeeping writes), plus reads on `big` while it is being written.
  * Asserts:
  *   (a) 0 responses mention "locked" / SQLITE_BUSY, and both index runs end ok;
- *   (b) every read answers within the query budget + 2 s, and the server thread's longest block is bounded
- *       (max(1000 ms × CI_FACTOR, 0.15 × the baseline big run measured in this process — see BLOCK_PER_RUN; LOCK_MAX_BLOCK_MS pins
- *       it: the runs execute in the worker since IX-2; reads on the repo being rewritten keep ~470 ms of their own
- *       work); the read slack × 2.5 on CI (see CI_FACTOR);
+ *   (b) every read answers within the query budget + 2 s, and the server thread's longest block is bounded by
+ *       MAX_BLOCK_MS (250 ms × CI_FACTOR; LOCK_MAX_BLOCK_MS pins it): the runs execute in the worker since IX-2 and the
+ *       near-neighbour KNN in the vector-search worker since MCP-ISSUE-132; the read slack × 2.5 on CI (see CI_FACTOR);
  *   (c) after the runs, the dirty edit on `small` is in the index (the queued refresh ran, behind `big`'s run) and no
  *       run is left: a read answers with the edit and is either not `refreshing`, or `refreshing` only because the
  *       gate's tree check outlived the budget ("checking the working tree …") while index_status lists no job and no
@@ -67,7 +66,7 @@ syncBuiltinESMExports();
 // ~830 ms against the 1000 ms bound. So on CI (GitHub sets CI=true) both timing bounds scaled by CI_FACTOR; since
 // row #19 below they keep it as a floor.
 //
-// Load-aware block bound (row #19, 2026-11-13). CI 6208ca9 run 43440259585 failed (b) at 2855 ms against 2500 with every
+// Load-aware block bound (row #19, 2026-11-13; REMOVED by MCP-ISSUE-132 below — kept as history). CI 6208ca9 run 43440259585 failed (b) at 2855 ms against 2500 with every
 // run ok: big run 35.5 s on the runner (local 10-20 s), and each late tick is the search_symbols on `big` in flight at
 // that moment (big reads 833 / 2864 ms, blocks 828 / 2855 ms). 5d30ac1 saw 2075 ms with a 22 s big run. A fixed CI
 // factor cannot follow a runner that is 1.5x slower one day and 3x the next, so the bound is calibrated on the
@@ -77,12 +76,23 @@ syncBuiltinESMExports();
 // Measured ratios (block / in-window big run): local ~0.035, CI ae22bf0 0.036, CI 5d30ac1 0.094, CI 6208ca9 0.080; the
 // baseline run is alone, so shorter than the in-window one (which shares the machine with the peer process), and
 // BLOCK_PER_RUN 0.15 leaves room for that. IX-1's class of defect (the run's own work on the server thread) blocks for
-// whole run phases, far above it. LOCK_MAX_BLOCK_MS (non-empty) still pins the bound. The negative control: LOCK_INJECT_BLOCK_MS=<ms> makes server A busy-wait
-// that long once inside the window (a preload watching a sentinel file); with <ms> >= 3x the bound, (b) must FAIL.
+// whole run phases, far above it. LOCK_MAX_BLOCK_MS (non-empty) still pins the bound. The sampler's own negative control
+// (still in force): LOCK_INJECT_BLOCK_MS=<ms> makes server A busy-wait that long once inside the window (a preload
+// watching a sentinel file); with <ms> >= 3x the bound, (b) must FAIL.
+//
+// MCP-ISSUE-132 (row #1, 2026-11-16): the late ticks above were not reads' "own work" but search_symbols' vector
+// near-neighbour padding — a sqlite-vec KNN (up to four brute-force scans of the repo's partition) run synchronously on
+// the server thread whenever FTS found < 3 rows, which is every name lookup on `big` while its full run rewrites it.
+// Proven on 44e1e9a: a CPU profile of server A put 2058 of 2097 ms of search_symbols in that query, and with the
+// server connection's busy_timeout forced to 0 there was no SQLITE_BUSY and the same 1061 ms block (not a lock wait).
+// The KNN now runs in the vector-search worker, so the load-aware bound of row #19 is gone: local runs at the fix show
+// no tick late by more than 100 ms. MAX_BLOCK_MS is a fixed 250 ms (× CI_FACTOR), below every block the defect produced
+// locally (433-1107 ms, 6 runs at 44e1e9a). The negative control for the defect: LOCK_SERVER_ENTRY=<a dist/index.js
+// built at 44e1e9a, inside this package so its imports resolve> runs both servers from that build; (b) must FAIL.
 const CI_FACTOR = process.env.CI ? 2.5 : 1;
-const MIN_BLOCK_MS = 1000;
-const BLOCK_PER_RUN = 0.15;
-const maxBlockFor = (bigRunMs) => Number(process.env.LOCK_MAX_BLOCK_MS || Math.max(MIN_BLOCK_MS * CI_FACTOR, Math.round(BLOCK_PER_RUN * bigRunMs)));
+const MIN_BLOCK_MS = 250;
+const maxBlockFor = () => Number(process.env.LOCK_MAX_BLOCK_MS || MIN_BLOCK_MS * CI_FACTOR);
+const SERVER_ENTRY = process.env.LOCK_SERVER_ENTRY || "dist/index.js";
 const INJECT_BLOCK_MS = Number(process.env.LOCK_INJECT_BLOCK_MS ?? 0);
 const injectPreload = (sentinel) => `data:text/javascript,${encodeURIComponent(`
 import fs from "node:fs";
@@ -159,7 +169,7 @@ function server(name, withSampler, onLine) {
   const sampler = pathToFileURL(resolve("scripts/test/_lagSampler.mjs")).href;
   const transport = new StdioClientTransport({
     command: "node",
-    args: [...(withSampler ? ["--import", sampler] : []), ...(SLOW_GIT_MS > 0 ? ["--import", SLOW_GIT_PRELOAD] : []), ...(withSampler && INJECT_BLOCK_MS > 0 ? ["--import", injectPreload(injectSentinel)] : []), "dist/index.js"],
+    args: [...(withSampler ? ["--import", sampler] : []), ...(SLOW_GIT_MS > 0 ? ["--import", SLOW_GIT_PRELOAD] : []), ...(withSampler && INJECT_BLOCK_MS > 0 ? ["--import", injectPreload(injectSentinel)] : []), SERVER_ENTRY],
     env: {
       ...process.env,
       CODEBASE_INDEX_ALLOWED_ROOTS: root,
@@ -257,8 +267,11 @@ try {
   const inWindow = lags.slice(lagFloor).filter((l) => l.at >= t0 && l.at <= t1);
   const blocks = inWindow.filter((l) => !l.heartbeat);
   const maxLag = Math.max(0, ...blocks.map((l) => l.blockedMs));
-  const MAX_BLOCK_MS = maxBlockFor(baselineBigMs);
-  console.log(`  info  server A main-thread ticks late > 100 ms: ${blocks.length}, max ${maxLag} ms; bound ${MAX_BLOCK_MS} ms = ${process.env.LOCK_MAX_BLOCK_MS ? "LOCK_MAX_BLOCK_MS" : `max(${MIN_BLOCK_MS * CI_FACTOR}, ${BLOCK_PER_RUN} × baseline big run ${baselineBigMs} ms)`}${INJECT_BLOCK_MS > 0 ? `; NEGATIVE CONTROL injected ${INJECT_BLOCK_MS} ms` : ""}`);
+  const MAX_BLOCK_MS = maxBlockFor();
+  const bigReads = reads.filter((r) => r.repo === "big");
+  const padding = bigReads.map((r) => (r.body?.paddingSkipped ? `skipped:${r.body.paddingSkipped}` : Array.isArray(r.body?.nearby) ? `nearby:${r.body.nearby.length}` : `names:${r.body?.count ?? "?"}`));
+  console.log(`  info  big reads (baseline big run ${baselineBigMs} ms): ${padding.join(" ")}`);
+  console.log(`  info  server A main-thread ticks late > 100 ms: ${blocks.length}, max ${maxLag} ms; bound ${MAX_BLOCK_MS} ms${process.env.LOCK_MAX_BLOCK_MS ? " (LOCK_MAX_BLOCK_MS)" : ""}${SERVER_ENTRY !== "dist/index.js" ? `; NEGATIVE CONTROL server entry ${SERVER_ENTRY}` : ""}${INJECT_BLOCK_MS > 0 ? `; NEGATIVE CONTROL injected ${INJECT_BLOCK_MS} ms` : ""}`);
   assert(inWindow.length > blocks.length, "(b) the lag sampler reported from inside the window");
   assert(maxLag <= MAX_BLOCK_MS, `(b) no server-thread block > ${MAX_BLOCK_MS} ms`, JSON.stringify(blocks.slice(0, 10)));
 

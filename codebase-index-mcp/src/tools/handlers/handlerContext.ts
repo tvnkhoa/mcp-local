@@ -4,6 +4,7 @@ import type { WatchManager } from "../../services/watch/watchManager.js";
 import type { ResponseProfile } from "../../middleware/responseFormatter.js";
 import type { IndexMode, IndexRunResult } from "../../types/index.js";
 import type { IndexJobQueue } from "../../services/indexing/indexJobs.js";
+import type { VectorSearchOutcome } from "../../repositories/vectorSearchWorkerClient.js";
 
 export interface HandlerConstants {
   MAX_FILES_PER_RUN: number;
@@ -63,6 +64,11 @@ export interface HandlerContext {
   /** The call's `notifications/progress` sink, when the client supplied a progress token. */
   progressNotifier?: (progress: number, total: number | undefined, message: string) => void;
   asText: (payload: unknown, profile?: ResponseProfile) => CallToolResult;
+  /**
+   * MCP-ISSUE-132: `search_symbols`' vector near-neighbours, computed in the vector-search worker and waited for with a
+   * budget (vectorSearchWorkerClient.ts). Absent in handler unit tests: the answer then says `paddingSkipped`.
+   */
+  vectorSearch?: (repoId: string, text: string, k: number) => Promise<VectorSearchOutcome>;
   constants: HandlerConstants;
   /**
    * R4: the HTTP client session of the call being handled. A refactor preview records it and only

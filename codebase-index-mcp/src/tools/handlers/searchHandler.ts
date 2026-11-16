@@ -28,7 +28,7 @@ function isMultiWordQuery(query: string): boolean {
 
 // ── search_symbols ────────────────────────────────────────────────────────────
 
-export function handleSearchSymbols(
+export async function handleSearchSymbols(
   args: {
     query: string;
     repoId?: string;
@@ -43,7 +43,7 @@ export function handleSearchSymbols(
     excludeTests: boolean;
   },
   ctx: HandlerContext
-): CallToolResult {
+): Promise<CallToolResult> {
   const { store } = ctx;
   const profile = resolveResponseProfile(args.profile as Parameters<typeof resolveResponseProfile>[0], args.compact);
 
@@ -64,7 +64,7 @@ export function handleSearchSymbols(
     return ctx.asText(profile === "nano" ? { ...base, coverage: coverage.confidence } : { ...base, coverage }, profile);
   }
 
-  const resultsRaw = store.searchSymbols(
+  let resultsRaw = store.searchSymbols(
     args.query,
     args.repoId ?? null,
     args.language ?? null,
@@ -73,6 +73,18 @@ export function handleSearchSymbols(
     args.limit,
     strategyUsed
   );
+  // MCP-ISSUE-132: vector near-neighbours for a near-miss name come from the vector-search worker, never from a KNN
+  // on this thread (0.3-2.9 s per scan blocked every session). A neighbour list that did not arrive within the budget
+  // is reported (`paddingSkipped` + a coverage gap), never silently dropped.
+  let paddingSkipped: keyof typeof PADDING_SKIP_REASON | undefined;
+  const padRepoId = args.repoId ?? null;
+  if (store.needsVectorPadding(resultsRaw.length, padRepoId)) {
+    const outcome = ctx.vectorSearch
+      ? await ctx.vectorSearch(padRepoId, args.query, args.limit)
+      : { skipped: "unavailable" as const };
+    if ("rows" in outcome) resultsRaw = store.appendVectorNeighbours(resultsRaw, padRepoId, outcome.rows, args.limit);
+    else paddingSkipped = outcome.skipped;
+  }
   const filtered = args.excludeTests ? resultsRaw.filter((s) => !isTestPath(s.filePath)) : resultsRaw;
   // Release B.1 (wec.aria acceptance): vector near-neighbours padded a name query to `limit` — 49 of 50
   // rows fuzzy for one exact, unique name — and agents read row 2 onwards as matches. Rows that match
@@ -139,7 +151,14 @@ export function handleSearchSymbols(
     ...("sqlDefinition" in s && s.sqlDefinition ? { sqlDefinition: s.sqlDefinition } : {})
   });
 
-  const nearby = nearbyRaw.length > 0 ? { nearby: nearbyRaw.map(row) } : {};
+  const skipped = paddingSkipped ? { paddingSkipped } : {};
+  const nearby = { ...(nearbyRaw.length > 0 ? { nearby: nearbyRaw.map(row) } : {}), ...skipped };
+  if (paddingSkipped) {
+    coverage.knownGaps = [
+      `vector near-neighbours (nearby) were not searched: ${PADDING_SKIP_REASON[paddingSkipped]}. Name matches are complete; repeat the call for the near-miss list.`,
+      ...coverage.knownGaps
+    ];
+  }
 
   if (profile === "nano") {
     const topSymbols = results.slice(0, 10).map(row);
@@ -151,11 +170,19 @@ export function handleSearchSymbols(
   }
 
   if (profile === "verbose") {
-    return ctx.asText({ query: args.query, strategy: strategyUsed, autoRouted: autoRouted || undefined, count: results.length, ...cap, symbols: results, ...(nearbyRaw.length > 0 && { nearby: nearbyRaw }), suggestions, suggestion, staleness, coverage, summary: { repoFilter: args.repoId ?? null, languageFilter: args.language ?? null, kindFilter: args.kind ?? null, filePathFilter: args.filePath ?? null } }, profile);
+    return ctx.asText({ query: args.query, strategy: strategyUsed, autoRouted: autoRouted || undefined, count: results.length, ...cap, symbols: results, ...(nearbyRaw.length > 0 && { nearby: nearbyRaw }), ...skipped, suggestions, suggestion, staleness, coverage, summary: { repoFilter: args.repoId ?? null, languageFilter: args.language ?? null, kindFilter: args.kind ?? null, filePathFilter: args.filePath ?? null } }, profile);
   }
 
-  return ctx.asText({ query: args.query, strategy: strategyUsed, autoRouted: autoRouted || undefined, count: results.length, ...cap, symbols: results, ...(nearbyRaw.length > 0 && { nearby: nearbyRaw }), suggestions, suggestion, staleness, coverage }, profile);
+  return ctx.asText({ query: args.query, strategy: strategyUsed, autoRouted: autoRouted || undefined, count: results.length, ...cap, symbols: results, ...(nearbyRaw.length > 0 && { nearby: nearbyRaw }), ...skipped, suggestions, suggestion, staleness, coverage }, profile);
 }
+
+/** MCP-ISSUE-132: why `search_symbols` answered without its vector near-neighbours. */
+const PADDING_SKIP_REASON = {
+  budget: "the vector search did not answer within its wait budget (it finishes in the background and is memoized)",
+  queue: "too many vector searches were already outstanding",
+  error: "the vector-search worker failed",
+  unavailable: "no vector-search worker in this context"
+} as const;
 
 /**
  * IX-C: what a caller whose own `limit` cut the answer should do next — wec.aria fell back to grep 55 times

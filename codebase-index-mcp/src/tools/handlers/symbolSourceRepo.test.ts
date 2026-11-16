@@ -73,26 +73,26 @@ test("buildLimitHint names the max, and outputMode:files only where it applies",
 
 const sym = (name: string, matchType?: "fuzzy") => ({ symbolId: `id-${name}`, name, kind: "function", filePath: `src/${name}.ts`, line: 1, signature: null, repoId: "r", ...(matchType && { matchType }) });
 
-function symbolsCall(rows: ReturnType<typeof sym>[], limit: number, profile = "compact"): Record<string, unknown> {
-  const store = { searchSymbols: () => rows, getSearchSuggestions: () => [], getRepository: () => null, getLatestRun: () => null };
+async function symbolsCall(rows: ReturnType<typeof sym>[], limit: number, profile = "compact"): Promise<Record<string, unknown>> {
+  const store = { searchSymbols: () => rows, needsVectorPadding: () => false, getSearchSuggestions: () => [], getRepository: () => null, getLatestRun: () => null };
   const asText = (payload: unknown): CallToolResult => ({ content: [{ type: "text", text: JSON.stringify(payload) }] });
   const ctx = { store, asText, constants: { MAX_RESULT_LIMIT: 500 } } as unknown as HandlerContext;
-  const out = handleSearchSymbols({ query: "a", strategy: "name", limit, compact: false, profile, ranked: false, excludeTests: false }, ctx);
+  const out = await handleSearchSymbols({ query: "a", strategy: "name", limit, compact: false, profile, ranked: false, excludeTests: false }, ctx);
   return JSON.parse((out.content[0] as { text: string }).text) as Record<string, unknown>;
 }
 
-test("search_symbols: name matches filling the limit carry complete:false + limitHint, at every profile", () => {
+test("search_symbols: name matches filling the limit carry complete:false + limitHint, at every profile", async () => {
   for (const profile of ["nano", "compact", "standard", "verbose"]) {
-    const out = symbolsCall([sym("a1"), sym("a2"), sym("a3")], 3, profile);
+    const out = await symbolsCall([sym("a1"), sym("a2"), sym("a3")], 3, profile);
     assert.equal(out.complete, false, profile);
     assert.match(String(out.limitHint), /max 500/, profile);
   }
 });
 
-test("search_symbols: under the limit, or padded to it by near-neighbours, has no hint", () => {
-  const under = symbolsCall([sym("a1"), sym("a2")], 3);
+test("search_symbols: under the limit, or padded to it by near-neighbours, has no hint", async () => {
+  const under = await symbolsCall([sym("a1"), sym("a2")], 3);
   assert.equal("limitHint" in under, false);
   assert.equal("complete" in under, false);
-  const padded = symbolsCall([sym("a1"), sym("n1", "fuzzy"), sym("n2", "fuzzy")], 3);
+  const padded = await symbolsCall([sym("a1"), sym("n1", "fuzzy"), sym("n2", "fuzzy")], 3);
   assert.equal("limitHint" in padded, false);
 });

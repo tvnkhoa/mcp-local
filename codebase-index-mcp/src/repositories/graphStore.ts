@@ -132,6 +132,10 @@ import {
   getContextByNameImpl,
   getSymbolCandidatesImpl
 } from "../services/search/symbolSearch.js";
+import {
+  needsVectorPadding as needsVectorPaddingImpl,
+  appendVectorNeighbours as appendVectorNeighboursImpl
+} from "../services/search/symbolSearchQuery.js";
 import { expandInterfaceSiblingsImpl } from "../services/graph/interfaceSiblings.js";
 import { resolveRouteHandlersImpl } from "../services/graph/routeHandlerResolver.js";
 import {
@@ -320,6 +324,20 @@ export class GraphStore {
   invalidateProcessCaches(): void {
     invalidateVectorSearchCache();
     this.unresolvedStatsCache.clear();
+    for (const fn of this.processCacheListeners) {
+      try {
+        fn();
+      } catch {
+        /* a listener's failure must not stop the invalidation */
+      }
+    }
+  }
+
+  private readonly processCacheListeners: (() => void)[] = [];
+
+  /** MCP-ISSUE-132: memos held off this thread (the vector-search worker's KNN memo) are cleared with this thread's. */
+  onProcessCachesInvalidated(fn: () => void): void {
+    this.processCacheListeners.push(fn);
   }
 
   runInTransaction(fn: () => void): void {
@@ -848,6 +866,21 @@ export class GraphStore {
 
   searchSymbols(query: string, repoId: string | null, language: string | null, kind: string | null, filePath: string | null, limit: number, strategy: "name" | "intent" = "name"): (SymbolRecord & { repoPath: string | null })[] {
     return searchSymbolsImpl(this.db, query, repoId, language, kind, filePath, limit, strategy);
+  }
+
+  /** MCP-ISSUE-132: whether a name search wants vector neighbours — fetched off this thread, see vectorSearchWorkerClient.ts. */
+  needsVectorPadding(matches: number, repoId: string | null): repoId is string {
+    return needsVectorPaddingImpl(this.db, matches, repoId);
+  }
+
+  /** MCP-ISSUE-132: append the worker's ranked neighbours as `fuzzy` rows, up to `limit` rows in all. */
+  appendVectorNeighbours(
+    rows: (SymbolRecord & { repoPath: string | null })[],
+    repoId: string,
+    neighbours: readonly { symbolId: string }[],
+    limit: number
+  ): (SymbolRecord & { repoPath: string | null })[] {
+    return appendVectorNeighboursImpl(this.db, rows, repoId, neighbours, limit);
   }
 
   getSearchSuggestions(query: string, repoId: string | null, limit: number): string[] {
