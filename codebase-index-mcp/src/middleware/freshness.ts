@@ -1309,10 +1309,45 @@ export function createFreshnessGate(opts: FreshnessGateOptions): FreshnessGate {
 }
 
 /**
+ * B-17: a find_field_accesses call waits on the type-resolution worker AFTER the gate, and that wait
+ * used to show only in `coverage` and `typeResolution` — `freshness.waitedMs` read 0 while the call sat at the ceiling.
+ * The wait is read off the TS-LS payload: the worker's round trip, when the answer is withheld because the type
+ * program is still building, or when the call itself built it (cold, a second or more).
+ */
+function typeProgramWait(payload: unknown): { ms: number; reason: string } | null {
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) return null;
+  const p = payload as { engine?: unknown; coverage?: unknown; typeResolution?: unknown };
+  if (p.engine !== "typescript-language-service") return null;
+  const tr = p.typeResolution as { roundTripMs?: unknown; cold?: unknown } | undefined;
+  const ms = typeof tr?.roundTripMs === "number" ? Math.round(tr.roundTripMs) : 0;
+  if (ms <= 0) return null;
+  const cov = p.coverage as { knownGaps?: unknown } | undefined;
+  const building = Array.isArray(cov?.knownGaps) && (cov.knownGaps as unknown[]).some((g) => typeof g === "string" && g.includes("type program still building"));
+  if (building) return { ms, reason: `waited ${String(ms)} ms for the TypeScript type program, which is still building; the answer is withheld, retry once it is built` };
+  if (tr?.cold === true && ms >= 1000) return { ms, reason: `waited ${String(ms)} ms while this call built the TypeScript type program` };
+  return null;
+}
+
+/**
+ * Fold a freshness note into a tool payload, and carry the call's wait on the type-resolution worker in the same
+ * block (`waitedMs` is the gate's wait plus the worker's; the reason names the type-program build).
+ */
+export function applyFreshness(payload: unknown, note: FreshnessNote | undefined): unknown {
+  const base = applyGateNote(payload, note);
+  const wait = typeProgramWait(base);
+  if (!wait || !base || typeof base !== "object") return base;
+  const prior = (base as { freshness?: FreshnessNote }).freshness;
+  const freshness: FreshnessNote = prior
+    ? { ...prior, waitedMs: (prior.waitedMs ?? 0) + wait.ms, reason: prior.reason ? `${prior.reason}; ${wait.reason}` : wait.reason }
+    : { state: "fresh", waitedMs: wait.ms, reason: wait.reason };
+  return { ...(base as Record<string, unknown>), freshness };
+}
+
+/**
  * Fold a freshness note into a tool payload: add the `freshness` block when the answer is not
  * known-current, and never let `coverage` say `high` about a tree it has not seen.
  */
-export function applyFreshness(payload: unknown, note: FreshnessNote | undefined): unknown {
+function applyGateNote(payload: unknown, note: FreshnessNote | undefined): unknown {
   if (!note || !payload || typeof payload !== "object" || Array.isArray(payload)) return payload;
   if (note.state === "fresh") {
     // F2: the tree is as current as the gate can make it, but a path it could not read is not in the index.
