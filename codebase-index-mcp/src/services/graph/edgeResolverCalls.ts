@@ -21,7 +21,7 @@ import {
   stripGenerics,
 } from "../../repositories/vectorStore.js";
 import { buildNamedCandidateMap, pickBestNamedCandidate } from "./edgeResolverShared.js";
-import { parameterCount, pickOwnedMethod, type MemberCandidate } from "./interfaceSiblings.js";
+import { parameterCount, pickInheritedMethod, type ClassBase, type MemberCandidate } from "./interfaceSiblings.js";
 import { buildImportedFilesByFile, isPythonFile, normalizeFilePath, pythonImportedFilesForName } from "./moduleResolution.js";
 import { immediateTransaction } from "../../repositories/sqliteTx.js";
 import { PYTHON_ARGS_HINT, PYTHON_RECEIVER_HINT } from "../extractors/pythonNoise.js";
@@ -896,6 +896,8 @@ export function rebuildInterfaceDispatchEdges(db: Database.Database, repoId: str
     }
     return rows;
   };
+  // MCP-ISSUE-133 (row #10): each non-Python class's in-repo base, for an implementer that inherits the method.
+  const classBases = implementors.size > 0 ? buildClassBases(db, repoId) : new Map<string, ClassBase>();
   const candidateMap = buildNamedCandidateMap(db, repoId, ["function", "method", "constructor", "class"]);
   // PY-5b: the base chains the Python fan-out walks — only built when a Protocol has implementers.
   const pythonBases = pythonImplementors.size > 0
@@ -918,7 +920,7 @@ export function rebuildInterfaceDispatchEdges(db: Database.Database, repoId: str
       const listed = implementors.get(call.ifaceId) ?? [];
       const cappedFiles = new Set([...new Set(listed.map((i) => i.filePath))].slice(0, MAX_INTERFACE_DISPATCH_FANOUT));
       for (const { implId, filePath } of listed.filter((i) => cappedFiles.has(i.filePath))) {
-        const impl = pickOwnedMethod(methodRows(call.name), implId, filePath, call.name, arity);
+        const impl = pickInheritedMethod(methodRows(call.name), (id) => classBases.get(id), implId, filePath, call.name, arity);
         if (!impl || impl.symbolId === call.methodId) continue;
         count += insert.run(repoId, call.fromId, impl.symbolId, repoId, call.fromId, impl.symbolId).changes;
       }
@@ -936,6 +938,31 @@ export function rebuildInterfaceDispatchEdges(db: Database.Database, repoId: str
   });
   tx();
   return count;
+}
+
+/**
+ * MCP-ISSUE-133 (row #10): each non-Python class's base class, from RESOLVED `EXTENDS` rows (a `base:` token is
+ * a framework base with nothing in-repo to bind to). C# allows one base class; when a class has several resolved
+ * rows (a mis-named interface, TS mixins) the first in extraction order — its rowid — is taken. Python keeps its
+ * own MRO walk (`buildPythonBases`).
+ */
+export function buildClassBases(db: Database.Database, repoId: string): Map<string, ClassBase> {
+  const bases = new Map<string, ClassBase>();
+  for (const r of db
+    .prepare(
+      `select e.from_id as classId, e.to_id as baseId, b.file_path as filePath, c.file_path as classFile
+       from edges e
+       inner join symbols c on c.repo_id = e.repo_id and c.symbol_id = e.from_id
+       inner join symbols b on b.repo_id = e.repo_id and b.symbol_id = e.to_id
+       where e.repo_id = ? and e.type = 'EXTENDS' and e.to_id not like 'base:%'
+         and b.kind in ('class', 'struct', 'record', 'record struct')
+       order by e.from_id, e.rowid`
+    )
+    .all(repoId) as { classId: string; baseId: string; filePath: string; classFile: string }[]) {
+    if (isPythonFile(r.classFile) || bases.has(r.classId)) continue;
+    bases.set(r.classId, { baseId: r.baseId, filePath: r.filePath });
+  }
+  return bases;
 }
 
 /** PY-6b: a method an untyped receiver's callers pass a class for, found by that class's MRO (confidence 0.65). */

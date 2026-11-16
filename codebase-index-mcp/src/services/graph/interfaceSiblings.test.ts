@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { parameterCount, pickOwnedMethod, type MemberCandidate } from "./interfaceSiblings.js";
+import { parameterCount, pickInheritedMethod, pickOwnedMethod, type ClassBase, type MemberCandidate } from "./interfaceSiblings.js";
 
 test("MCP-ISSUE-133: parameterCount reads the declaration's top-level parameters", () => {
   assert.equal(parameterCount("Task Save(string key, int value);", "Save"), 2);
@@ -27,4 +27,25 @@ test("MCP-ISSUE-133: pickOwnedMethod — owner link first, file only for unlinke
   assert.equal(pickOwnedMethod(rows, "A", "S.cs", "Save", 5)?.symbolId, "a1", "no overload fits: the first");
   assert.equal(pickOwnedMethod(rows, "B", "S.cs", "Save", 1), undefined, "another type's Save in the file is not B's");
   assert.equal(pickOwnedMethod(rows, "L", "L.cs", "Save", 1)?.symbolId, "legacy");
+});
+
+test("MCP-ISSUE-133 (row #10): pickInheritedMethod — own first, else the most-derived base declaration; cycles stop", () => {
+  const rows: MemberCandidate[] = [
+    { symbolId: "root", filePath: "Root.cs", parentSymbolId: "Root", signature: "public abstract Task Save(string k);" },
+    { symbolId: "mid", filePath: "Mid.cs", parentSymbolId: "Mid", signature: "public override Task Save(string k)" },
+    { symbolId: "own", filePath: "Own.cs", parentSymbolId: "Own", signature: "public Task Save(string k)" }
+  ];
+  const bases = new Map<string, ClassBase>([
+    ["Leaf", { baseId: "Mid", filePath: "Mid.cs" }],
+    ["Mid", { baseId: "Root", filePath: "Root.cs" }],
+    ["Own", { baseId: "Mid", filePath: "Mid.cs" }],
+    ["X", { baseId: "Y", filePath: "Y.cs" }],
+    ["Y", { baseId: "X", filePath: "X.cs" }]
+  ]);
+  const baseOf = (id: string) => bases.get(id);
+  assert.equal(pickInheritedMethod(rows, baseOf, "Leaf", "Leaf.cs", "Save", 1)?.symbolId, "mid", "the override in the middle beats the abstract root");
+  assert.equal(pickInheritedMethod(rows, baseOf, "Own", "Own.cs", "Save", 1)?.symbolId, "own", "an own declaration wins");
+  assert.equal(pickInheritedMethod(rows, baseOf, "Mid", "Mid.cs", "Save", 1)?.symbolId, "mid");
+  assert.equal(pickInheritedMethod(rows, baseOf, "X", "X.cs", "Save", 1), undefined, "a cycle ends with no pick");
+  assert.equal(pickInheritedMethod(rows, baseOf, "Free", "Free.cs", "Save", 1), undefined, "no base, no Save");
 });

@@ -45,9 +45,54 @@
   - `findMemberMethod` uses `pickOwnedMethod`.
 - **TS / Java:** TS uses the same path (its implementers come from IMPLEMENTS too); mcp-local shows no change because no
   file of it holds two implementers of one interface. There is no Java lane.
-- **Not covered:** an implementer that INHERITS the method from a base class gets no dispatch edge (before the fix it got
-  whatever same-named method its file held, if any). The call-site overload is not known; the arity comes from the
-  interface method the call resolved to.
+- **Not covered by row #2 (fixed in row #10, below):** an implementer that INHERITS the method from a base class got no
+  dispatch edge. Still not covered: the call-site overload is not known; the arity comes from the interface method the
+  call resolved to.
 - **Tests:** `dispatchRebuild.test.ts` (3 cases), `interfaceSiblings.test.ts`, and `test:interface-dispatch` section 5
   (real C# extraction: helper type, nested type, wrong-arity overload declared first, two interfaces with a same-named
   member in one file). They fail on 44e1e9a and pass with the fix.
+
+### Row #10 — the method an implementer inherits from a base class (FIXED 2026-11-16, branch `wt/cs-inherit`)
+
+- **Scenario:** `class Impl : Base, IFoo` where only `Base` declares `Do()`. A call through `IFoo.Do` got no
+  `interface-dispatch` edge, because `pickOwnedMethod` looked only at `Impl`'s own members, so `Base.Do` showed no
+  caller from the interface side.
+- **Fix:** `pickInheritedMethod` (`interfaceSiblings.ts`). It takes the implementer's own method first, then walks the
+  RESOLVED `EXTENDS` chain (in-repo class bases; for several resolved rows the first in extraction order), binding by owner
+  at each step. The most-derived declaration wins, so a `Mid` override beats an abstract `Root`. A cycle, or a chain past
+  16 steps, stops with no pick. `rebuildInterfaceDispatchEdges` builds the base map once (`buildClassBases`, non-Python
+  classes; Python keeps its C3 MRO walk). The query-layer `expandInterfaceSiblings` uses the same walk when an implementer
+  has no own member. A framework base (`base:DbContext`, external boundary) ends the chain. Cross-repo bases are out of
+  scope.
+- **INDEX_VERSION** `v17-owner-dispatch-py-protocols` → `v18-inherited-dispatch`: dispatch targets change for unchanged
+  files, so an index built at v17 escalates its next scoped run to FULL. Measured on a scratch copy of a v17
+  wec.communication-hub index: an `incremental` request ran `mode: full`.
+- **Measured** (scratch DBs, base build ad5ddd0 vs fix, full runs): wec.communication-hub @93488c1, mcp-local @ad5ddd0
+  (TS/JS/Py) and translate @98b1bd3 (Py) have CALLS sets identical at sha256 level. CommHub has one implementer
+  without its own member (`ApplicationDbContext`), and its base is the framework `DbContext`. ssnet @597b162 and wec.document-management @27bf9b8 are also identical.
+  wec.social-ads @3dbf741 (4 uncommitted files in that repo, the same tree for both runs): CALLS 21 144 → 21 207,
+  **+63, 0 removed**:
+  - **23 `interface-dispatch` → `PureRepository.Update@26`: correct.** Typed `ICampaignRepository` fields call `Update`
+    (e.g. `ApproveCampaignCommandHandler.Handle` line 117, `CancelCampaignCommandHandler.Handle` 95,
+    `LaunchingToLaunchedJob.ExecuteAsync` 78, `PlatformCampaignService.UpdateCampaignWithPlatformInfoAsync` 118,
+    `ApprovalAutoCancelJob.ExecuteAsync` 138). `CampaignRepository : PureRepository<Campaign>, ICampaignRepository` has
+    no `Update` of its own, so the inherited `PureRepository.Update` is what runs.
+  - **9 `interface-dispatch` → `PureRepository.AddAsync@17`: right base, wrong route.** Each sits on an existing
+    `resolved interface method (unproven receiver)` bind to `ICampaignYoutubeRepository.AddAsync`
+    (`CampaignYoutubeRepository : PureRepository<CampaignYoutube>, ICampaignYoutubeRepository`). The callers really call
+    `ITenantRepository` / `IMediaRepository` / `ISocialPlatformAccountRepository` / `ITargeting*RefRepository` /
+    `IMetaAudienceRepository.AddAsync`, which those interfaces inherit from `IPureRepository<T>` and do not declare. The
+    `PureRepository.AddAsync` target is what runs for an implementer that does not override it. For
+    `CreateMetaAudienceCommandHandler.Handle` it is wrong: `MetaAudienceRepository` overrides `AddAsync`.
+  - **31 `base-class-dispatch` → `MetaAudienceRepository.Update@64` / `.AddAsync@59`: wrong (over-approximation).**
+    `resolveBaseClassDispatch` fans every CALLS edge into a virtual method out to every subclass override, including the
+    new `interface-dispatch` edges into `PureRepository.Update`. The receiver behind `ICampaignRepository` is a
+    `CampaignRepository`, never a `MetaAudienceRepository`. This chaining is how base-class dispatch already behaves for
+    any caller of a virtual method. Row #10 gives it new inputs and does not change it (`edgeResolverContracts.ts` is out
+    of this row's scope). Proposed follow-up: when the CALLS edge into the virtual method is itself `interface-dispatch`
+    from implementer `K`, fan out only to overrides in subclasses of `K`.
+- **Tests:** `dispatchRebuild.test.ts` (inherited, abstract root + middle override, an other-owner method in the base's
+  file, an own `new` method, a cycle, a framework base token), `interfaceSiblings.test.ts` (`pickInheritedMethod`),
+  `test:interface-dispatch` section 6 (real C# extraction: plain base, generic `RepoBase<T>`, abstract root overridden in
+  the middle; dispatch and siblings). They fail at ad5ddd0 and pass with the fix. `runPolicy.test.ts` covers the v18
+  generation and the escalation from v17.

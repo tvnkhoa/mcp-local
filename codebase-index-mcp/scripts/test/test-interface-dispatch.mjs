@@ -341,11 +341,114 @@ function runIssue133() {
   console.log("[ok] MCP-ISSUE-133: dispatch and siblings reach each implementer type's own Save overload");
 }
 
+// ── 6. MCP-ISSUE-133 (row #10): the method an implementer INHERITS from an in-repo base class ─────────
+
+const inheritInterfaces = `
+namespace App.Abstractions;
+
+public interface IStore
+{
+    Task Save(string key);
+}
+
+public interface IRepo<T>
+{
+    Task Add(T item);
+}
+`;
+
+// Plain base, generic base, and an abstract root overridden in the middle of the chain.
+const inheritBases = `
+namespace App.Infrastructure;
+
+public class StoreBase
+{
+    public Task Save(string key) => Task.CompletedTask;
+}
+
+public class RepoBase<T>
+{
+    public Task Add(T item) => Task.CompletedTask;
+}
+
+public abstract class RootStore
+{
+    public abstract Task Save(string key);
+}
+
+public class MidStore : RootStore
+{
+    public override Task Save(string key) => Task.CompletedTask;
+}
+`;
+
+const inheritImpls = `
+namespace App.Infrastructure;
+
+public class PlainStore : StoreBase, IStore { }
+
+public class OrderRepo : RepoBase<Order>, IRepo<Order> { }
+
+public class LeafStore : MidStore, IStore { }
+`;
+
+const inheritCaller = `
+namespace App.Handlers;
+
+public class InheritHandler(IStore store, IRepo<Order> repo)
+{
+    public async Task Handle() { await store.Save("k"); await repo.Add(new Order()); }
+}
+`;
+
+function runInheritedBaseMethod() {
+  const dbPath = createTempDbPath("ifd-inherit");
+  const store = new GraphStore(dbPath);
+  const repoId = "ifd-inherit";
+  store.ensureRepository(repoId, path.dirname(dbPath));
+
+  const ifaces = indexFile(store, repoId, "src/Abstractions/Contracts.cs", inheritInterfaces);
+  const bases = indexFile(store, repoId, "src/Infrastructure/Bases.cs", inheritBases);
+  const impls = indexFile(store, repoId, "src/Infrastructure/Impls.cs", inheritImpls);
+  const caller = indexFile(store, repoId, "src/Handlers/InheritHandler.cs", inheritCaller);
+  // The order indexRunner's post-phase uses: IMPLEMENTS, EXTENDS, calls, then the dispatch rebuild.
+  store.resolveImplementsEdges(repoId);
+  store.resolveExtendsEdges(repoId);
+  const ctx = store.buildCallResolutionContext(repoId);
+  while (store.resolveCallEdgesBatch(repoId, ctx, 5000) > 0) { /* drain */ }
+  store.rebuildInterfaceDispatchEdges(repoId);
+
+  const byId = new Map([...ifaces.symbols, ...bases.symbols, ...impls.symbols].map((s) => [s.symbolId, s]));
+  const label = (id) => {
+    const s = byId.get(id);
+    return s ? `${byId.get(s.parentSymbolId)?.name ?? "(none)"}.${s.name}` : id;
+  };
+  const handle = caller.symbols.find((s) => s.kind === "method" && s.name === "Handle");
+  const dispatch = store
+    .getCallEdges(repoId, handle.symbolId, "callees", 50)
+    .filter((e) => e.reason === "interface-dispatch")
+    .map((e) => label(e.toId))
+    .sort();
+  // StoreBase.Save for PlainStore, MidStore.Save (not the abstract RootStore.Save) for LeafStore, RepoBase.Add
+  // for OrderRepo through the generic base.
+  assert.deepEqual(dispatch, ["MidStore.Save", "RepoBase.Add", "StoreBase.Save"], `inherited members (got ${JSON.stringify(dispatch)})`);
+
+  // The query-layer sibling expansion agrees for IStore.Save.
+  const ifaceSave = ifaces.symbols.find((s) => s.kind === "method" && s.name === "Save");
+  const siblings = store.expandInterfaceSiblings(repoId, [ifaceSave.symbolId]).filter((s) => s.via === "interface").map((s) => label(s.symbolId)).sort();
+  assert.deepEqual(siblings, ["MidStore.Save", "StoreBase.Save"], `interface siblings (got ${JSON.stringify(siblings)})`);
+
+  store.close();
+  fs.rmSync(path.dirname(dbPath), { recursive: true });
+  console.log("[ok] MCP-ISSUE-133 (row #10): dispatch and siblings reach a method inherited from an in-repo base");
+}
+
 try {
   runExtraction();
   runResolutionAndQuery();
   runStaleIndexSafetyNet();
   runIssue133();
+  runInheritedBaseMethod();
   console.log("[ok] test-interface-dispatch passed");
 } catch (err) {
   console.error("test-interface-dispatch: FAILED:", err.message);

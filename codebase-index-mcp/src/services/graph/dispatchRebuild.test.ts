@@ -134,3 +134,42 @@ test("release L: base-class dispatch is rebuilt whole — a re-run never duplica
   resolveBaseClassDispatch(conn, "r");
   assert.deepEqual(calls(conn, "base-class-dispatch"), ["caller>Sub.M"], "one edge after two runs; Sub2.M keeps its direct edge");
 });
+
+test("MCP-ISSUE-133 (row #10): an implementer that inherits the interface method from a base class reaches the base's declaration", () => {
+  const conn = db();
+  sym(conn, "I", "IStore", "interface", "IStore.cs");
+  sym(conn, "I.Save", "Save", "method", "IStore.cs", "I", "Task Save(string key);");
+  // Inherited: Impl : StoreBase, IStore — only StoreBase declares Save.
+  sym(conn, "Base", "StoreBase", "class", "StoreBase.cs");
+  sym(conn, "Base.Save", "Save", "method", "StoreBase.cs", "Base", "public Task Save(string key)");
+  sym(conn, "Impl", "Impl", "class", "Impl.cs");
+  // Abstract root + override in the middle: Leaf : Mid : Root — the most-derived declaration (Mid's) wins.
+  sym(conn, "Root", "Root", "class", "Root.cs");
+  sym(conn, "Root.Save", "Save", "method", "Root.cs", "Root", "public abstract Task Save(string key);");
+  sym(conn, "Mid", "Mid", "class", "Mid.cs");
+  sym(conn, "Mid.Save", "Save", "method", "Mid.cs", "Mid", "public override Task Save(string key)");
+  sym(conn, "Leaf", "Leaf", "class", "Leaf.cs");
+  // A base whose same-named method has another type's owner in its file is not bound by file.
+  sym(conn, "Lone", "Lone", "class", "Lone.cs");
+  sym(conn, "LoneBase", "LoneBase", "class", "LoneBase.cs");
+  sym(conn, "Other", "Other", "class", "LoneBase.cs");
+  sym(conn, "Other.Save", "Save", "method", "LoneBase.cs", "Other", "public Task Save(string key)");
+  // An implementer with its own Save keeps it even when its base declares one too.
+  sym(conn, "Own", "Own", "class", "Own.cs");
+  sym(conn, "Own.Save", "Save", "method", "Own.cs", "Own", "public new Task Save(string key)");
+  sym(conn, "caller", "Handle", "method", "H.cs");
+  for (const c of ["Impl", "Leaf", "Lone", "Own"]) edge(conn, c, "I", "IMPLEMENTS", "resolved interface");
+  edge(conn, "Impl", "Base", "EXTENDS", "base_list class", 0.95);
+  edge(conn, "Leaf", "Mid", "EXTENDS", "base_list class", 0.95);
+  edge(conn, "Mid", "Root", "EXTENDS", "base_list class", 0.95);
+  edge(conn, "Lone", "LoneBase", "EXTENDS", "base_list class", 0.95);
+  edge(conn, "Own", "Base", "EXTENDS", "base_list class", 0.95);
+  // A cycle (bad data) must not loop.
+  edge(conn, "LoneBase", "Lone", "EXTENDS", "base_list class", 0.95);
+  // A framework base is still a token: the walk stops there.
+  edge(conn, "Impl", "base:ControllerBase", "EXTENDS", "external boundary", 0.1);
+  edge(conn, "caller", "I.Save", "CALLS", "resolved interface method");
+
+  rebuildInterfaceDispatchEdges(conn, "r");
+  assert.deepEqual(calls(conn, "interface-dispatch"), ["caller>Base.Save", "caller>Mid.Save", "caller>Own.Save"]);
+});
