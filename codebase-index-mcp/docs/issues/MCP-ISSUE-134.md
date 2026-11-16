@@ -44,8 +44,16 @@
     - The gate uses `liveRunMarkersAsync`, which does an async readdir and reads each marker once, in parallel.
     - The verdict logic is shared through `judgeRunMarker`. The sync `liveRunMarkers` for its other callers now also reads
       each marker once.
-    - The gate reads the dirty ledger with `readDirtyLedgerAsync`, then re-checks `inflight` after that await, as it
-      already did after the tree read.
+    - The gate reads the dirty ledger with `readDirtyLedgerAsync`, started concurrently with the tree read, so it adds no
+      serial step to the query budget.
+    - The marker readdir is the one added serial step: a threadpool hop. Under `test:unit`'s parallel load it pushed three
+      freshness tests past their 20-30 ms budgets / 50 ms wait, failing twice in a row:
+      - "a run that outlives the budget…"
+      - "MCP-ISSUE-110: a tree check that outlives…"
+      - "F4: a killed repair is counted…"
+
+      Each now asks again until the answer settles (bounded at 2 s, `settled()` in freshness.test.ts). Each keeps its
+      run-count assertion, so the answer still comes from that one run. Production budgets are ≥ 300 ms.
   - Harness: `LOCK_CPU_PROF=<dir>` profiles server A's main thread until the window closes. The late-tick line now
     names the read in flight for each block.
 - **After (local, same conditions as run 3):** sync fs time in the window fell from 2546 ms to 186 ms.
@@ -53,10 +61,15 @@
   profile predates moving the ledger read async), `repairNames` (10 ms) and the run's own marker and ledger writes.
   Late ticks: 0 (max 0 ms). Evidence for the gates and runs:
   `~/.claude/handover/briefs/2026-11-16-mcp-local-ci-block-evidence.md`.
-- **Left (not in this row's scope):**
-  - `buildIndexMeta(withFreshness)` (`find_impact_files`) and the `context` resource still call the sync
-    `getRepoStaleness`. Both enclosing functions are sync with many callers, so the change is more than a one-liner.
-    Follow-up candidate.
+- **Left (not in this row's scope; a follow-up, accepted by the leader):** read tools and resources that still read
+  HEAD synchronously (`resolveHeadCommitSha`, via `readHeadShaFromFiles`) on the server thread, on every call:
+  - `find_impact_files`: `buildIndexMeta(…, withFreshness=true)` → `getRepoStaleness` (impactHandler.ts:880). The
+    enclosing function is sync and has about 10 call sites.
+  - The `codebase://…/context` resource: `readRepoResource` → `getRepoStaleness` (resourceHandler.ts:62). It is a sync
+    resource reader.
+  - `detect_changes` and the change-impact tool: `handleDetectChanges` / `handleChangeImpact` →
+    `computeChangedFileImpacts` → `resolveHeadCommitSha` (changeAnalysis.ts:129).
+  - Not per read: `runPolicy.ts` (mode decisions when a job starts) and `indexRunner` / `indexPipeline` (inside a run).
   - `readRepairNeeded` (a readdir per gate check, about 0.1 ms per read here) is still sync.
 - **Workaround used / fallback note:** the codebase-index MCP server did not connect in this session
   (`CONNECT_TIMEOUT` after 30 s), so discovery used baseline grep/Read on exact identifiers (`searchSymbolsImpl`,

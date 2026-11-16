@@ -95,6 +95,23 @@ function harness(opts: HarnessOpts): Harness {
   };
 }
 
+
+/**
+ * MCP-ISSUE-134: the gate's state-dir reads (run markers, dirty ledger) went async, a threadpool hop each. On a loaded
+ * machine a test's very next call can then miss a 20-30 ms budget once the run it waits for has finished. Where
+ * a test asserts that a finished run serves "the next query", it asks again until the answer settles (bounded),
+ * and its run count still proves the answer came from that run, not another.
+ */
+async function settled<T>(ask: () => Promise<T>, done: (v: T) => boolean, withinMs = 2000): Promise<T> {
+  const end = Date.now() + withinMs;
+  let v = await ask();
+  while (!done(v) && Date.now() < end) {
+    await new Promise((r) => setTimeout(r, 10));
+    v = await ask();
+  }
+  return v;
+}
+
 test("an index at HEAD with a clean tree is fresh, and nothing runs", async () => {
   const h = harness({ budgetMs: 1000, autoFinish: true });
   try {
@@ -135,7 +152,7 @@ test("a run that outlives the budget is not aborted: the answer says refreshing,
 
     h.finishRun();
     await new Promise((r) => setTimeout(r, 5));
-    assert.deepEqual(await h.gate.ensureFresh("r"), { state: "fresh" }, "the finished run serves the next query");
+    assert.deepEqual(await settled(() => h.gate.ensureFresh("r"), (n) => n.state !== "refreshing"), { state: "fresh" }, "the finished run serves the next query");
     assert.equal(h.runs.length, 1);
   } finally { h.cleanup(); }
 });
@@ -367,7 +384,7 @@ test("MCP-ISSUE-110: a tree check that outlives the budget answers refreshing, r
 
     await new Promise((r) => setTimeout(r, 300));
     assert.deepEqual(runs, ["incremental"], "the background check started the refresh it found was needed");
-    assert.deepEqual(await gate.ensureFresh("r"), { state: "fresh" }, "and that run serves the next query");
+    assert.deepEqual(await settled(() => gate.ensureFresh("r"), (n) => n.state !== "refreshing"), { state: "fresh" }, "and that run serves the next query");
     assert.equal(runs.length, 1);
   } finally {
     rmSync(lockDir, { recursive: true, force: true });
@@ -1253,8 +1270,8 @@ test("MCP-ISSUE-101 F4: a killed repair is counted too (the attempt is written b
   try {
     fs.writeFileSync(path.join(h.lockDir, "running-r-999999-1.json"), JSON.stringify({ pid: 999999, at: 1, mode: "incremental", repoId: "r" }));
     void h.gate.ensureFresh("r");
-    await new Promise((resolve) => setTimeout(resolve, 50));
-    assert.equal(readRepairNeeded(h.lockDir, "r")?.attempts, 1, "counted while still running");
+    const attempts = await settled(async () => readRepairNeeded(h.lockDir, "r")?.attempts, (n) => n === 1);
+    assert.equal(attempts, 1, "counted while still running");
     h.finishRun();
   } finally { h.cleanup(); }
 });

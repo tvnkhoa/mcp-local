@@ -1220,6 +1220,9 @@ export function createFreshnessGate(opts: FreshnessGateOptions): FreshnessGate {
   };
 
   const checkTree = async (repoId: string, repoPath: string, repair: RepairNeeded | null, started: number): Promise<Verdict> => {
+    // MCP-ISSUE-134: the dirty ledger is read off the server thread, concurrently with the tree read, so it adds no
+    // serial step to the query budget. Never rejects (readDirtyLedgerAsync answers null on any error).
+    const ledgerRead = readDirtyLedgerAsync(opts.lockDir, repoId);
     let tree: RepoTreeState;
     try {
       tree = await opts.readTree(repoPath);
@@ -1239,10 +1242,7 @@ export function createFreshnessGate(opts: FreshnessGateOptions): FreshnessGate {
     const treeNow: RepoTreeState = { head: tree.head, dirty: dirtyNow };
     const indexed = opts.getIndexedCommit(repoId);
     const headMoved = !indexed || !sameCommit(tree.head, indexed);
-    const vanished = headMoved ? [] : vanishedDirtyPaths(await readDirtyLedgerAsync(opts.lockDir, repoId), tree.head, dirtyNow);
-    // MCP-ISSUE-134: that read yielded; a concurrent call for this repo can have started a run meanwhile (as above).
-    const startedDuringLedger = inflight.get(repoId);
-    if (startedDuringLedger) return { note: await waitBudget(repoId, startedDuringLedger, startedDuringLedger.base), changed: null };
+    const vanished = headMoved ? [] : vanishedDirtyPaths(await ledgerRead, tree.head, dirtyNow);
     const changed = headMoved ? null : pathsChangedSince(readCovered(repoId), key);
     if (!repair && !headMoved && vanished.length === 0 && (Object.keys(key.files).length === 0 || changed?.length === 0)) {
       const note: FreshnessNote = { state: "fresh" };
