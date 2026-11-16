@@ -101,6 +101,14 @@ keeps the branch. Never `rm -r` a worktree or a node_modules in one (it follows 
 never `npm install` in one (it writes through the junctions).
 `test:scripts`' skills test only counts when run from the main tree.
 
+**The suite runs once per push wave, at the merge gate** (`ci-changed`, single-server and shared alike).
+A row's own gate runs only the harnesses its diff maps to via `codebase-index-mcp/scripts/test-map.json`
+(`node scripts/run-tests.mjs --changed [<base>] --list`, then `npm run <name>` each); the script has no
+flag that disables its whole-suite fallback, so if the list is the whole suite, run the named targets by hand.
+A row on a server-thread / worker / lock path also gets a CI run on its branch before accept
+(`gh workflow run CI --ref wt/<name>`, after the owner's yes to push the branch). One `INDEX_VERSION`
+bump per wave, assigned by the leader; never measure on the live served process.
+
 ### Generated files — do not hand-edit (S-35, S-36)
 
 Each server's `.env.example`, the `<!-- BEGIN/END GENERATED -->` blocks in its `README.md`, and its
