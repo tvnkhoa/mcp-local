@@ -85,8 +85,12 @@ function expand(entries, groups) {
  * Pure selection: changed paths + the map + the suite → what runs and why.
  *
  * Returns `{ whole, selected: [{ name, why }], skipped: [{ file, reason }], unitOnly, uncovered }`.
+ *
+ * `mappedOnly` (run-tests.mjs --mapped-only) turns off the one fail safe that widens the run: an
+ * uncovered file is still listed in `uncovered`, but selects nothing, so `whole` stays false and the
+ * selection is the mapped harnesses plus what always runs (always + scripts with no map entry).
  */
-export function selectForChanges({ changed, map, suite }) {
+export function selectForChanges({ changed, map, suite, mappedOnly = false }) {
   const groups = map.groups ?? {};
   const matcher = (globs) => {
     const res = globs.map(globToRegExp);
@@ -119,7 +123,7 @@ export function selectForChanges({ changed, map, suite }) {
     for (const h of matched) hits.set(h.name, [...(hits.get(h.name) ?? []), file]);
   }
 
-  const whole = uncovered.length > 0;
+  const whole = uncovered.length > 0 && !mappedOnly;
   const selected = [];
   for (const name of suite) {
     if (whole) selected.push({ name, why: "whole suite" });

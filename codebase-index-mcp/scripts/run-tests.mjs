@@ -19,15 +19,23 @@
  *   node scripts/run-tests.mjs --bail             # stop at the first failure
  *   node scripts/run-tests.mjs --changed [<base>] # only what the change since <base> needs (default: merge-base
  *                                                 # with origin/main) — scripts/test-map.json; add --list to preview
+ *   node scripts/run-tests.mjs --changed [<base>] --mapped-only
+ *                                                 # exactly the mapped harnesses + what always runs: a changed file
+ *                                                 # not in test-map.json is a warning, not the whole suite (exit 0
+ *                                                 # unless a harness fails); an unresolvable base exits 2
  *   node scripts/run-tests.mjs --no-lock          # skip the machine-wide heavy-check lock (CI=true skips it too)
+ *
+ * Stopping the runner stops its children: each script runs as a tracked child, and SIGINT / SIGTERM /
+ * SIGBREAK, an exit, the shell above the runner killed (orphan stop) or a hard kill of the runner (via a
+ * watchdog) kills every child process tree and frees the heavy lock — ../../scripts/lib/childTree.mjs.
  */
 
-import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import process from "node:process";
 import { fileURLToPath } from "node:url";
 
+import { createChildTracker } from "../../scripts/lib/childTree.mjs";
 import { holdHeavyLockOrExit } from "../../scripts/lib/heavyLock.mjs";
 import { failureExcerpt } from "./lib/failureExcerpt.mjs";
 import { changedFiles, EXCLUDED, selectForChanges, suiteScripts } from "./lib/testSelect.mjs";
@@ -37,6 +45,12 @@ const argv = process.argv.slice(2);
 const LIST_ONLY = argv.includes("--list");
 const BAIL = argv.includes("--bail");
 const INTEGRATION_ONLY = argv.includes("--integration-only");
+const MAPPED_ONLY = argv.includes("--mapped-only");
+
+if (MAPPED_ONLY && !argv.includes("--changed")) {
+  console.error("--mapped-only needs --changed [<base>]");
+  process.exit(2);
+}
 
 const scripts = JSON.parse(fs.readFileSync(path.join(ROOT, "package.json"), "utf8")).scripts ?? {};
 
@@ -55,15 +69,24 @@ function selectChanged() {
   try {
     changes = changedFiles({ cwd: ROOT, base });
   } catch (error) {
-    console.log(`--changed: cannot resolve the base (${String(error.message).split("\n")[0]}) — running the whole suite`);
+    const why = String(error.message).split("\n")[0];
+    // --mapped-only has no mapped set to fall back to without a base; running nothing would read as a pass.
+    if (MAPPED_ONLY) {
+      console.error(`--changed --mapped-only: cannot resolve the base (${why}) — nothing to map; pass a base that resolves`);
+      process.exit(2);
+    }
+    console.log(`--changed: cannot resolve the base (${why}) — running the whole suite`);
     return suite;
   }
   const map = JSON.parse(fs.readFileSync(path.join(ROOT, "scripts", "test-map.json"), "utf8"));
-  const result = selectForChanges({ changed: changes.files, map, suite });
+  const result = selectForChanges({ changed: changes.files, map, suite, mappedOnly: MAPPED_ONLY });
   console.log(`--changed: base ${changes.base.slice(0, 12)}${base === undefined ? " (merge-base HEAD origin/main)" : ""}, ${String(changes.files.length)} changed file(s)`);
   for (const { file, reason } of result.skipped) console.log(`  skipped: ${file} (${reason})`);
   for (const file of result.unitOnly) console.log(`  test:unit only: ${file}`);
-  for (const file of result.uncovered) console.log(`  not in test-map.json → WHOLE SUITE: ${file}`);
+  for (const file of result.uncovered) {
+    if (MAPPED_ONLY) console.warn(`  WARNING not in test-map.json, no harness selected for it (--mapped-only): ${file}`);
+    else console.log(`  not in test-map.json → WHOLE SUITE: ${file}`);
+  }
   console.log(`selected ${String(result.selected.length)}/${String(suite.length)}:`);
   for (const { name, why } of result.selected) console.log(`  ${name} ← ${why}`);
   console.log("");
@@ -89,7 +112,10 @@ if (needsBuild && !fs.existsSync(path.join(ROOT, "dist", "index.js"))) {
 
 // The latency bounds in these harnesses assume the suite has the machine to itself; another session's
 // gate running alongside is what made test:freshness-worker flake (277 ms > 250) — scripts/lib/heavyLock.mjs.
-await holdHeavyLockOrExit({ cmd: `codebase-index run-tests ${argv.join(" ")}`.trim(), noLock: argv.includes("--no-lock") });
+// The tracker first: its signal listeners must kill the children before the lock's listener exits.
+const children = createChildTracker({ name: "run-tests" });
+const lock = await holdHeavyLockOrExit({ cmd: `codebase-index run-tests ${argv.join(" ")}`.trim(), noLock: argv.includes("--no-lock") });
+children.setLock(lock);
 
 const npm = process.platform === "win32" ? "npm.cmd" : "npm";
 const failures = [];
@@ -98,10 +124,9 @@ const started = Date.now();
 for (const [index, name] of selected.entries()) {
   const label = `[${String(index + 1).padStart(2)}/${selected.length}] ${name}`;
   const t0 = Date.now();
-  const result = spawnSync(npm, ["run", name, "--silent"], {
+  const result = await children.run(npm, ["run", name, "--silent"], {
     cwd: ROOT,
-    stdio: ["ignore", "pipe", "pipe"],
-    encoding: "utf8",
+    capture: true,
     shell: process.platform === "win32"
   });
   const elapsed = `${((Date.now() - t0) / 1000).toFixed(1)}s`;

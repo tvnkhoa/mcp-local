@@ -25,6 +25,7 @@
     "scripts/heavy-lock.mjs",
     "scripts/mcp-doctor.mjs",
     "scripts/install-mcp.mjs",
+    "scripts/lib/childTree.test.mjs",
     ".github/**",
     "contracts/**"
   ],
@@ -398,7 +399,8 @@
       "codebase-index-mcp/scripts/lib/testSelect.mjs",
       "codebase-index-mcp/scripts/test-map.json",
       "codebase-index-mcp/package.json",
-      "scripts/lib/heavyLock.mjs"
+      "scripts/lib/heavyLock.mjs",
+      "scripts/lib/childTree.mjs"
     ],
     "test:tests-for-diff": [
       "codebase-index-mcp/scripts/test/test-tests-for-diff.mjs",
