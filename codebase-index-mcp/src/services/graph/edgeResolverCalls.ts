@@ -21,6 +21,7 @@ import {
   stripGenerics,
 } from "../../repositories/vectorStore.js";
 import { buildNamedCandidateMap, pickBestNamedCandidate } from "./edgeResolverShared.js";
+import { parameterCount, pickOwnedMethod, type MemberCandidate } from "./interfaceSiblings.js";
 import { buildImportedFilesByFile, isPythonFile, normalizeFilePath, pythonImportedFilesForName } from "./moduleResolution.js";
 import { immediateTransaction } from "../../repositories/sqliteTx.js";
 import { PYTHON_ARGS_HINT, PYTHON_RECEIVER_HINT } from "../extractors/pythonNoise.js";
@@ -585,11 +586,10 @@ export function resolveCallEdgesBatch(
           const memberCandidates = candidateMap.get(memberName) ?? [];
           // PY-5 review: a Python file often holds a Protocol and a class with the same method name
           // (`Executor.close` beside `Store.close`); the file match alone picked whichever id sorted first.
-          // The owner link decides for Python; C# keeps the file match unchanged.
+          // The owner link decides. MCP-ISSUE-133: for C#/TS too — a file declaring two interfaces with a
+          // same-named member gave every call the first one's; the file match stays for rows with no owner link.
           const ifaceMethod =
-            (isPythonFile(iface.filePath)
-              ? memberCandidates.find((c) => c.kind === "method" && c.parentSymbolId === iface.symbolId)
-              : undefined) ??
+            memberCandidates.find((c) => c.kind === "method" && c.parentSymbolId === iface.symbolId) ??
             memberCandidates.find((c) => c.filePath === iface.filePath && c.kind === "method");
           if (ifaceMethod) {
             match = ifaceMethod;
@@ -828,16 +828,17 @@ export function rebuildInterfaceDispatchEdges(db: Database.Database, repoId: str
   rebuildPythonUntypedReceiverEdges(db, repoId);
   const calls = db
     .prepare(
-      `select distinct e.from_id as fromId, s.symbol_id as methodId, s.name as name, s.parent_symbol_id as ifaceId
+      `select distinct e.from_id as fromId, s.symbol_id as methodId, s.name as name, s.parent_symbol_id as ifaceId, s.signature as signature
        from edges e
        inner join symbols s on s.repo_id = e.repo_id and s.symbol_id = e.to_id
        inner join symbols i on i.repo_id = s.repo_id and i.symbol_id = s.parent_symbol_id and i.kind = 'interface'
        where e.repo_id = ? and e.type = 'CALLS' and e.reason in (?, ?) and s.kind = 'method'
        order by e.from_id, s.symbol_id`
     )
-    .all(repoId, INTERFACE_METHOD_REASON, INTERFACE_METHOD_UNPROVEN_REASON) as { fromId: string; methodId: string; name: string; ifaceId: string }[];
+    .all(repoId, INTERFACE_METHOD_REASON, INTERFACE_METHOD_UNPROVEN_REASON) as { fromId: string; methodId: string; name: string; ifaceId: string; signature: string | null }[];
   if (calls.length === 0) return 0;
-  const implementorFiles = new Map<string, string[]>();
+  /** MCP-ISSUE-133: implementer TYPES per interface (not their files) — a file can hold several types. */
+  const implementors = new Map<string, { implId: string; filePath: string }[]>();
   /** PY-6: Python implementer class ids per interface — Python files often hold several implementers. */
   const pythonImplementors = new Map<string, string[]>();
   for (const r of db
@@ -855,13 +856,26 @@ export function rebuildInterfaceDispatchEdges(db: Database.Database, repoId: str
       else pythonImplementors.set(r.ifaceId, [r.implId]);
       continue;
     }
-    const list = implementorFiles.get(r.ifaceId);
-    // Rows are ordered by (iface, file), so skipping a repeat of the last file keeps the old
-    // `distinct (iface, file)` list exactly, now that the row also carries the implementer id.
-    if (list) {
-      if (list[list.length - 1] !== r.filePath) list.push(r.filePath);
-    } else implementorFiles.set(r.ifaceId, [r.filePath]);
+    const list = implementors.get(r.ifaceId);
+    if (list) list.push({ implId: r.implId, filePath: r.filePath });
+    else implementors.set(r.ifaceId, [{ implId: r.implId, filePath: r.filePath }]);
   }
+  // MCP-ISSUE-133: same-named method rows with their owner and signature, per name, ordered like the
+  // candidate map (file, id) so the pick among equals is the one it always was.
+  const methodRowsStmt = db.prepare(
+    `select symbol_id as symbolId, file_path as filePath, parent_symbol_id as parentSymbolId, signature from symbols
+     where repo_id = ? and name = ? and kind = 'method'
+     order by file_path, symbol_id`
+  );
+  const methodRowsByName = new Map<string, MemberCandidate[]>();
+  const methodRows = (name: string): MemberCandidate[] => {
+    let rows = methodRowsByName.get(name);
+    if (!rows) {
+      rows = methodRowsStmt.all(repoId, name) as MemberCandidate[];
+      methodRowsByName.set(name, rows);
+    }
+    return rows;
+  };
   const candidateMap = buildNamedCandidateMap(db, repoId, ["function", "method", "constructor", "class"]);
   // PY-5b: the base chains the Python fan-out walks — only built when a Protocol has implementers.
   const pythonBases = pythonImplementors.size > 0
@@ -875,8 +889,16 @@ export function rebuildInterfaceDispatchEdges(db: Database.Database, repoId: str
   let count = 0;
   const tx = immediateTransaction(db, () => {
     for (const call of calls) {
-      for (const filePath of (implementorFiles.get(call.ifaceId) ?? []).slice(0, MAX_INTERFACE_DISPATCH_FANOUT)) {
-        const impl = (candidateMap.get(call.name) ?? []).find((c) => c.filePath === filePath && c.kind === "method");
+      // MCP-ISSUE-133: the method the implementer TYPE declares, the overload with the interface method's
+      // arity — this used to take the first same-named method in the implementer's FILE, which on a file with
+      // a helper type, a nested type or a second implementer is another type's method.
+      // The cap still counts FILES, as it always has: counting types instead changed which implementers survive
+      // it (wec.communication-hub: `ISender`, 11 implementers in 6 files) — every type in a capped file is reached.
+      const arity = parameterCount(call.signature, call.name);
+      const listed = implementors.get(call.ifaceId) ?? [];
+      const cappedFiles = new Set([...new Set(listed.map((i) => i.filePath))].slice(0, MAX_INTERFACE_DISPATCH_FANOUT));
+      for (const { implId, filePath } of listed.filter((i) => cappedFiles.has(i.filePath))) {
+        const impl = pickOwnedMethod(methodRows(call.name), implId, filePath, call.name, arity);
         if (!impl || impl.symbolId === call.methodId) continue;
         count += insert.run(repoId, call.fromId, impl.symbolId, repoId, call.fromId, impl.symbolId).changes;
       }

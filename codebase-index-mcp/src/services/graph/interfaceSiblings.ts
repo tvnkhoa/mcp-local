@@ -28,6 +28,7 @@ type SeedRow = {
   kind: string;
   filePath: string;
   parentSymbolId: string | null;
+  signature: string | null;
 };
 
 export function expandInterfaceSiblingsImpl(
@@ -39,7 +40,7 @@ export function expandInterfaceSiblingsImpl(
   const ph = seedIds.map(() => "?").join(",");
   const seeds = db
     .prepare(
-      `select symbol_id as symbolId, name, kind, file_path as filePath, parent_symbol_id as parentSymbolId
+      `select symbol_id as symbolId, name, kind, file_path as filePath, parent_symbol_id as parentSymbolId, signature
        from symbols where repo_id = ? and symbol_id in (${ph})`
     )
     .all(repoId, ...seedIds) as SeedRow[];
@@ -57,7 +58,7 @@ export function expandInterfaceSiblingsImpl(
     if (TYPE_KINDS.has(seed.kind)) {
       const children = db
         .prepare(
-          `select symbol_id as symbolId, name, kind, file_path as filePath, parent_symbol_id as parentSymbolId
+          `select symbol_id as symbolId, name, kind, file_path as filePath, parent_symbol_id as parentSymbolId, signature
            from symbols where repo_id = ? and parent_symbol_id = ? and kind in ('method', 'constructor', 'property')`
         )
         .all(repoId, seed.symbolId) as SeedRow[];
@@ -90,7 +91,7 @@ export function expandInterfaceSiblingsImpl(
         )
         .all(repoId, parent.symbolId, `iface:${parent.name}`, IMPLEMENTOR_CAP) as { symbolId: string; filePath: string }[];
       for (const impl of implementors) {
-        const sibling = findMemberMethod(db, repoId, impl.symbolId, impl.filePath, method.name);
+        const sibling = findMemberMethod(db, repoId, impl.symbolId, impl.filePath, method.name, method.signature);
         if (sibling) add(sibling, "interface");
       }
     } else {
@@ -125,7 +126,7 @@ export function expandInterfaceSiblingsImpl(
               .prepare(`select symbol_id as symbolId, file_path as filePath from symbols where repo_id = ? and symbol_id = ? and kind = 'interface' limit 1`)
               .get(repoId, edge.toId) as { symbolId: string; filePath: string } | undefined);
         if (!iface) continue;
-        const sibling = findMemberMethod(db, repoId, iface.symbolId, iface.filePath, method.name);
+        const sibling = findMemberMethod(db, repoId, iface.symbolId, iface.filePath, method.name, method.signature);
         if (sibling) add(sibling, "interface");
       }
     }
@@ -159,35 +160,92 @@ function resolveParentType(
   return fallback ?? null;
 }
 
-/** Method `name` thuộc type `typeSymbolId` — ưu tiên parent linkage, fallback name+file. */
+/** A same-named method row, as `pickOwnedMethod` weighs it. */
+export type MemberCandidate = { symbolId: string; filePath: string; parentSymbolId: string | null; signature: string | null };
+
+/**
+ * The parameter count of `name`'s declaration in a stored signature, or null when it cannot be read.
+ *
+ * Counts top-level commas inside the parameter list, so `Dictionary<string, int>`, `(int, int)` tuples, array
+ * and object literals in defaults, and strings do not add parameters. An arrow (`=>`) in a TypeScript default
+ * is not a closing `>`.
+ */
+export function parameterCount(signature: string | null, name: string): number | null {
+  if (!signature) return null;
+  const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const head = new RegExp(`(?:^|[^\\w$])${escaped}\\s*(?:<[^()]*>)?\\s*\\(`).exec(signature);
+  if (!head) return null;
+  let i = head.index + head[0].length;
+  let depth = 0;
+  let commas = 0;
+  let quote: string | null = null;
+  let sawContent = false;
+  for (; i < signature.length; i++) {
+    const ch = signature[i];
+    if (quote) {
+      if (ch === "\\") i++;
+      else if (ch === quote) quote = null;
+      continue;
+    }
+    if (ch === '"' || ch === "'" || ch === "`") {
+      quote = ch;
+      sawContent = true;
+    } else if (ch === "(" || ch === "[" || ch === "{" || ch === "<") depth++;
+    else if (ch === ">" && signature[i - 1] === "=") continue;
+    else if (ch === ")" || ch === "]" || ch === "}" || ch === ">") {
+      if (depth === 0) {
+        if (ch !== ")") return null;
+        return sawContent ? commas + 1 : 0;
+      }
+      depth--;
+    } else if (ch === "," && depth === 0) commas++;
+    else if (!/\s/.test(ch)) sawContent = true;
+  }
+  return null;
+}
+
+/**
+ * MCP-ISSUE-133: the method `name` that type `ownerId` declares — never another type's from the same file.
+ *
+ * `candidates` are same-named method rows in a stable order. The owner link decides; the owner's file is
+ * consulted only for rows with NO owner link (an index written before `parent_symbol_id`), because a row
+ * that names a different owner is that owner's method — a sibling class, a nested type — and binding to it
+ * attributes the call to code the dispatch never runs. Among the owner's overloads, the first whose
+ * parameter count equals `arity` wins; with no arity, or no fit, the first.
+ */
+export function pickOwnedMethod<T extends MemberCandidate>(
+  candidates: readonly T[],
+  ownerId: string,
+  ownerFile: string,
+  name: string,
+  arity: number | null
+): T | undefined {
+  const owned = candidates.filter((c) => c.parentSymbolId === ownerId);
+  const pool = owned.length > 0 ? owned : candidates.filter((c) => c.parentSymbolId === null && c.filePath === ownerFile);
+  if (pool.length > 1 && arity !== null) {
+    const fit = pool.find((c) => parameterCount(c.signature, name) === arity);
+    if (fit) return fit;
+  }
+  return pool[0];
+}
+
+/** Method `name` thuộc type `typeSymbolId` — parent linkage; name+file only for rows with no parent (MCP-ISSUE-133). */
 function findMemberMethod(
   db: Database.Database,
   repoId: string,
   typeSymbolId: string,
   typeFilePath: string,
-  name: string
+  name: string,
+  sourceSignature: string | null
 ): string | null {
-  // Both lookups are name-based, and C# permits OVERLOADS — several methods with this exact name under
-  // the same parent. `limit 1` therefore picks one of several valid rows, and unordered it picked
-  // differently between runs. Ordering does not make the choice *correct* (see the note below), but it
-  // makes it the same choice every time, which is the difference between a wrong edge and a wrong edge
-  // that also moves.
-  const byParent = db
+  // Ordered so the choice among rows is the same every run (MCP-ISSUE-032); `pickOwnedMethod` then makes it
+  // the right one: the owner's own method, the overload with the source method's arity.
+  const rows = db
     .prepare(
-      `select symbol_id as symbolId from symbols
-       where repo_id = ? and parent_symbol_id = ? and name = ? and kind = 'method'
-       order by symbol_id
-       limit 1`
+      `select symbol_id as symbolId, file_path as filePath, parent_symbol_id as parentSymbolId, signature from symbols
+       where repo_id = ? and name = ? and kind = 'method' and (parent_symbol_id = ? or (parent_symbol_id is null and file_path = ?))
+       order by symbol_id`
     )
-    .get(repoId, typeSymbolId, name) as { symbolId: string } | undefined;
-  if (byParent) return byParent.symbolId;
-  const byFile = db
-    .prepare(
-      `select symbol_id as symbolId from symbols
-       where repo_id = ? and file_path = ? and name = ? and kind = 'method'
-       order by symbol_id
-       limit 1`
-    )
-    .get(repoId, typeFilePath, name) as { symbolId: string } | undefined;
-  return byFile?.symbolId ?? null;
+    .all(repoId, name, typeSymbolId, typeFilePath) as MemberCandidate[];
+  return pickOwnedMethod(rows, typeSymbolId, typeFilePath, name, parameterCount(sourceSignature, name))?.symbolId ?? null;
 }
