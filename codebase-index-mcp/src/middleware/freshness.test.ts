@@ -12,7 +12,7 @@ import Database from "better-sqlite3";
 
 import { termScanPersistFileName } from "../services/docs/termScan.js";
 import { parseStatusPorcelainV2 } from "../services/git/gitHelpers.js";
-import { applyFreshness, changedUnderPrefixes, computeTreeKey, createFreshnessGate, clearRepairNeeded, DEFAULT_STALE_RUN_MS, liveRunMarkers, markRepairNeeded, RUN_MARKER_STALE_MARGIN_MS, pathsChangedSince, readDirtyLedger, readRepairNeeded, recordDirtyLedger, removeRepoStateFiles, tryAcquireLock, UNREADABLE, watcherRunPlan, type RepoTreeState, type TreeKey } from "./freshness.js";
+import { applyFreshness, changedUnderPrefixes, computeTreeKey, createFreshnessGate, clearRepairNeeded, DEFAULT_STALE_RUN_MS, liveRunMarkers, liveRunMarkersAsync, markRepairNeeded, RUN_MARKER_STALE_MARGIN_MS, pathsChangedSince, readDirtyLedger, readDirtyLedgerAsync, readRepairNeeded, recordDirtyLedger, removeRepoStateFiles, tryAcquireLock, UNREADABLE, watcherRunPlan, type RepoTreeState, type TreeKey } from "./freshness.js";
 import { GraphStore } from "../repositories/graphStore.js";
 import { createIndexRunner } from "../services/indexing/indexRunner.js";
 import { runIndexPipeline } from "../services/indexing/indexPipeline.js";
@@ -1146,6 +1146,31 @@ test("run markers are matched per exact repoId: `a` does not see the run of `a-b
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
+test("MCP-ISSUE-134: liveRunMarkersAsync gives liveRunMarkers' verdicts — exact repoId, torn file, live, stale, dead (swept + flagged)", async () => {
+  const dir = mkdtempSync(path.join(tmpdir(), "cim-markers-async-"));
+  try {
+    const now = Date.now();
+    const live = { pid: process.pid, at: now };
+    writeFileSync(path.join(dir, `running-a-b-${String(process.pid)}-1.json`), JSON.stringify({ ...live, repoId: "a-b" }));
+    writeFileSync(path.join(dir, `running-a-${String(process.pid)}-2.json`), JSON.stringify(live)); // old form: name alone
+    writeFileSync(path.join(dir, `running-a-${String(process.pid)}-3.json`), "{\"pid\":"); // being written
+    writeFileSync(path.join(dir, `running-x_y-${String(process.pid)}-4.json`), JSON.stringify({ ...live, repoId: "x/y" }));
+    for (const id of ["a", "a-b", "x y", "x/y", "none"]) {
+      assert.deepEqual(await liveRunMarkersAsync(dir, id, 60_000, now), liveRunMarkers(dir, id, 60_000, now), id);
+    }
+    assert.equal((await liveRunMarkersAsync(dir, "a", 60_000, now)).length, 1);
+    assert.deepEqual(await liveRunMarkersAsync(dir, "x y", 60_000, now), []);
+    // stale (pid alive, past staleMs) and dead (pid gone, names a mode): not live, removed, the dead one flagged
+    writeFileSync(path.join(dir, `running-s-${String(process.pid)}-5.json`), JSON.stringify({ pid: process.pid, at: 1_000, repoId: "s" }));
+    writeFileSync(path.join(dir, "running-d-999999-6.json"), JSON.stringify({ pid: 999999, at: 5, mode: "dirty", repoId: "d" }));
+    assert.deepEqual(await liveRunMarkersAsync(dir, "s", 60_000, 100_000), []);
+    assert.deepEqual(await liveRunMarkersAsync(dir, "d", 60_000, now), []);
+    assert.equal(readRepairNeeded(dir, "d")?.mode, "dirty");
+    assert.ok(!fs.readdirSync(dir).some((n) => n.startsWith("running-s-") || n.startsWith("running-d-")), "stale and dead markers swept");
+    assert.deepEqual(await liveRunMarkersAsync(path.join(dir, "missing"), "a", 60_000, now), [], "no state dir");
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
 test("a live run of `a-b` does not make the gate of `a` answer refreshing", async () => {
   const h = harness({ budgetMs: 1000, autoFinish: true });
   try {
@@ -1736,4 +1761,16 @@ test("IX-B: the tools pass the query's filePathPrefix (string or array) to the g
   assert.equal(queryPrefixes(""), undefined);
   assert.equal(queryPrefixes(["src/", ""]), undefined, "an empty prefix is the whole repo");
   assert.equal(queryPrefixes([]), undefined);
+});
+
+test("MCP-ISSUE-134: readDirtyLedgerAsync reads what readDirtyLedger reads — a ledger, a malformed one, none", async () => {
+  const dir = mkdtempSync(path.join(tmpdir(), "cim-ledger-async-"));
+  try {
+    assert.equal(await readDirtyLedgerAsync(dir, "r"), null, "none");
+    recordDirtyLedger(dir, "r", "dirty", { head: "abc", dirty: ["b.ts", "a.ts"] });
+    assert.deepEqual(await readDirtyLedgerAsync(dir, "r"), readDirtyLedger(dir, "r"));
+    assert.deepEqual(await readDirtyLedgerAsync(dir, "r"), { head: "abc", paths: ["a.ts", "b.ts"] });
+    writeFileSync(path.join(dir, "dirty-m.json"), JSON.stringify({ head: 1, paths: [] }));
+    assert.equal(await readDirtyLedgerAsync(dir, "m"), null, "malformed");
+  } finally { rmSync(dir, { recursive: true, force: true }); }
 });

@@ -430,6 +430,8 @@ export function clearRepairNeeded(lockDir: string, repoId: string, flags?: reado
   }
 }
 
+type RunMarkerBody = { pid?: number; at?: number; mode?: IndexMode; staleAfterMs?: unknown; repoId?: unknown };
+
 /** The live run markers for a repo: pid alive and younger than `staleMs`. Dead or stale ones are removed. */
 export function liveRunMarkers(
   lockDir: string,
@@ -449,29 +451,77 @@ export function liveRunMarkers(
   const live: Array<{ pid: number; at: number }> = [];
   for (const name of names) {
     const file = path.join(lockDir, name);
-    if (markerNamesOtherRepo(file, repoId)) continue;
-    let m: { pid?: number; at?: number; mode?: IndexMode; staleAfterMs?: unknown } = {};
+    let text: string;
     try {
-      m = JSON.parse(fs.readFileSync(file, "utf8")) as typeof m;
+      text = fs.readFileSync(file, "utf8");
     } catch {
-      continue; // being written, or just removed
+      continue; // just removed
     }
-    // IX-A/IX-B: a marker that names its own bound (the run's deadline) is judged by it plus a margin; an older one by staleMs.
-    const bound = typeof m.staleAfterMs === "number" && Number.isFinite(m.staleAfterMs) && m.staleAfterMs >= 0 ? m.staleAfterMs + RUN_MARKER_STALE_MARGIN_MS : staleMs;
-    if (typeof m.pid === "number" && typeof m.at === "number" && pidAlive(m.pid) && now - m.at <= bound) {
-      live.push({ pid: m.pid, at: m.at });
-    } else {
-      // F4: a holder that died mid-run left the index part-written; so may one that outlived `staleMs` and dies
-      // later, so an expired marker is remembered too (a marker of an older build names no mode: skipped).
-      // The marker is the only memory of the dead run until the flag is on disk: if the write fails (an unwritable
-      // state dir) it stays, and the next check sweeps it again — dropping it first would answer "fresh" for good.
-      if (typeof m.pid === "number" && typeof m.mode === "string") {
-        if (!writeFlag(lockDir, repoId, { mode: m.mode, pid: m.pid, at: typeof m.at === "number" ? m.at : 0 })) continue;
-      }
-      removeRunMarker(file);
-    }
+    const hit = judgeRunMarker(lockDir, repoId, file, text, staleMs, now, writeFlag);
+    if (hit) live.push(hit);
   }
   return live;
+}
+
+/**
+ * {@link liveRunMarkers} with the state dir read on the libuv threadpool (MCP-ISSUE-134): the freshness gate runs it
+ * on every read tool call, and a sync readdir + one read per marker waits out the disk queue on the server thread.
+ * Same verdicts; the rare dead-marker sweep (flag write + unlink) stays sync, as in {@link liveRunMarkers}.
+ */
+export async function liveRunMarkersAsync(
+  lockDir: string,
+  repoId: string,
+  staleMs: number,
+  now: number,
+  writeFlag: typeof markRepairNeeded = markRepairNeeded
+): Promise<Array<{ pid: number; at: number }>> {
+  const prefix = runMarkerPrefix(repoId);
+  let names: string[];
+  try {
+    names = (await fs.promises.readdir(lockDir)).filter((n) => isRunMarkerName(prefix, n));
+  } catch {
+    return [];
+  }
+  const texts = await Promise.all(names.map((n) => fs.promises.readFile(path.join(lockDir, n), "utf8").catch(() => null)));
+  const live: Array<{ pid: number; at: number }> = [];
+  names.forEach((name, i) => {
+    const text = texts[i];
+    if (text === null || text === undefined) return; // just removed
+    const hit = judgeRunMarker(lockDir, repoId, path.join(lockDir, name), text, staleMs, now, writeFlag);
+    if (hit) live.push(hit);
+  });
+  return live;
+}
+
+/** One marker's verdict from its text, read once (it was read twice: once for its repoId, once for the rest). */
+function judgeRunMarker(
+  lockDir: string,
+  repoId: string,
+  file: string,
+  text: string,
+  staleMs: number,
+  now: number,
+  writeFlag: typeof markRepairNeeded
+): { pid: number; at: number } | null {
+  let m: RunMarkerBody;
+  try {
+    m = JSON.parse(text) as RunMarkerBody;
+  } catch {
+    return null; // being written
+  }
+  if (typeof m.repoId === "string" && m.repoId !== repoId) return null; // see isRunMarkerName
+  // IX-A/IX-B: a marker that names its own bound (the run's deadline) is judged by it plus a margin; an older one by staleMs.
+  const bound = typeof m.staleAfterMs === "number" && Number.isFinite(m.staleAfterMs) && m.staleAfterMs >= 0 ? m.staleAfterMs + RUN_MARKER_STALE_MARGIN_MS : staleMs;
+  if (typeof m.pid === "number" && typeof m.at === "number" && pidAlive(m.pid) && now - m.at <= bound) return { pid: m.pid, at: m.at };
+  // F4: a holder that died mid-run left the index part-written; so may one that outlived `staleMs` and dies
+  // later, so an expired marker is remembered too (a marker of an older build names no mode: skipped).
+  // The marker is the only memory of the dead run until the flag is on disk: if the write fails (an unwritable
+  // state dir) it stays, and the next check sweeps it again — dropping it first would answer "fresh" for good.
+  if (typeof m.pid === "number" && typeof m.mode === "string") {
+    if (!writeFlag(lockDir, repoId, { mode: m.mode, pid: m.pid, at: typeof m.at === "number" ? m.at : 0 })) return null;
+  }
+  removeRunMarker(file);
+  return null;
 }
 
 /** Default age past which a run marker counts as left by a crashed run (see `FreshnessGateOptions.staleRunMs`). */
@@ -548,6 +598,16 @@ function ledgerFileFor(lockDir: string, repoId: string): string {
 export function readDirtyLedger(lockDir: string, repoId: string): DirtyLedger | null {
   try {
     const parsed = JSON.parse(fs.readFileSync(ledgerFileFor(lockDir, repoId), "utf8")) as DirtyLedger;
+    return typeof parsed.head === "string" && Array.isArray(parsed.paths) ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+/** {@link readDirtyLedger} on the libuv threadpool (MCP-ISSUE-134): the gate reads the ledger on every read tool call. */
+export async function readDirtyLedgerAsync(lockDir: string, repoId: string): Promise<DirtyLedger | null> {
+  try {
+    const parsed = JSON.parse(await fs.promises.readFile(ledgerFileFor(lockDir, repoId), "utf8")) as DirtyLedger;
     return typeof parsed.head === "string" && Array.isArray(parsed.paths) ? parsed : null;
   } catch {
     return null;
@@ -1074,7 +1134,7 @@ export function createFreshnessGate(opts: FreshnessGateOptions): FreshnessGate {
     if (running) return { note: await waitBudget(repoId, running, running.base), changed: null };
 
     // MCP-ISSUE-101 part 5: a run of this repo in any process (index_repository, a watcher, another gate).
-    const markers = liveRunMarkers(opts.lockDir, repoId, staleRunMs, started);
+    const markers = await liveRunMarkersAsync(opts.lockDir, repoId, staleRunMs, started); // MCP-ISSUE-134: off the server thread
     if (markers.length > 0) {
       const oldest = Math.min(...markers.map((m) => m.at));
       return {
@@ -1179,7 +1239,10 @@ export function createFreshnessGate(opts: FreshnessGateOptions): FreshnessGate {
     const treeNow: RepoTreeState = { head: tree.head, dirty: dirtyNow };
     const indexed = opts.getIndexedCommit(repoId);
     const headMoved = !indexed || !sameCommit(tree.head, indexed);
-    const vanished = headMoved ? [] : vanishedDirtyPaths(readDirtyLedger(opts.lockDir, repoId), tree.head, dirtyNow);
+    const vanished = headMoved ? [] : vanishedDirtyPaths(await readDirtyLedgerAsync(opts.lockDir, repoId), tree.head, dirtyNow);
+    // MCP-ISSUE-134: that read yielded; a concurrent call for this repo can have started a run meanwhile (as above).
+    const startedDuringLedger = inflight.get(repoId);
+    if (startedDuringLedger) return { note: await waitBudget(repoId, startedDuringLedger, startedDuringLedger.base), changed: null };
     const changed = headMoved ? null : pathsChangedSince(readCovered(repoId), key);
     if (!repair && !headMoved && vanished.length === 0 && (Object.keys(key.files).length === 0 || changed?.length === 0)) {
       const note: FreshnessNote = { state: "fresh" };
