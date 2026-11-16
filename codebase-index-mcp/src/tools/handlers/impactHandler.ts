@@ -25,6 +25,7 @@ import type { StaleAmbiguousGroup } from "../../repositories/docsStore.js";
 import { exactFieldAnswer, tryExactFieldAccesses } from "./fieldAccessExact.js";
 import type { HandlerContext } from "./handlerContext.js";
 import { isNameOnlyEdgeReason } from "../../types/index.js";
+import { PolicyViolationError } from "../../services/refactor/refactorUtils.js";
 
 // ── Staleness Gate ────────────────────────────────────────────────────────────
 // Stale index is a warning, not a fatal — every other read tool (search_symbols,
@@ -952,10 +953,10 @@ export function handleRouteMap(
 // The allowlist is the scope table: a table is readable exactly when it has a repo filter.
 const ALLOWED_QUERY_GRAPH_TABLES = new Set(Object.keys(QUERY_GRAPH_TABLE_SCOPES));
 
-export function handleQueryGraph(
+export async function handleQueryGraph(
   args: { repoId: string; sql: string; params?: Record<string, unknown>; limit: number; timeoutMs: number; profile: string },
   ctx: HandlerContext
-): CallToolResult {
+): Promise<CallToolResult> {
   const { store } = ctx;
   const profile = resolveResponseProfile(args.profile as Parameters<typeof resolveResponseProfile>[0]);
 
@@ -974,17 +975,48 @@ export function handleQueryGraph(
     );
   }
 
-  let result: ReturnType<typeof store.runReadOnlyGraphQuery>;
-  try {
-    result = store.runReadOnlyGraphQuery(allowlistCheck.sanitizedSql, { ...args.params, repoId: args.repoId }, args.limit, args.timeoutMs);
-  } catch (err: unknown) {
-    // A scope refusal is the caller's mistake, not a failed query, and its message is ours.
-    if (err instanceof QueryGraphScopeError) {
-      throw new McpError(ErrorCode.InvalidParams, err.message);
-    }
-    const raw = err instanceof Error ? err.message : String(err);
+  const failed = (raw: string): McpError => {
     const safe = raw.replace(/['"][^'"]{0,200}['"]/g, "'...'").slice(0, 300);
-    throw new McpError(ErrorCode.InternalError, `query_graph: query failed — ${safe}. Check SQL syntax and allowed tables.`);
+    return new McpError(ErrorCode.InternalError, `query_graph: query failed — ${safe}. Check SQL syntax and allowed tables.`);
+  };
+  const boundParams = { ...args.params, repoId: args.repoId } as Record<string, string | number | boolean | null>;
+
+  let result: ReturnType<typeof store.runReadOnlyGraphQuery>;
+  if (ctx.queryGraph) {
+    // MCP-ISSUE-135: the statement runs in a child process that is killed at timeoutMs; this thread only awaits it.
+    const outcome = await ctx.queryGraph(allowlistCheck.sanitizedSql, boundParams, args.limit, args.timeoutMs);
+    switch (outcome.kind) {
+      case "result":
+        result = outcome.result;
+        break;
+      case "timeout":
+        throw new PolicyViolationError(
+          "QUERY_TIMEOUT",
+          `query_graph: query exceeded timeoutMs ${args.timeoutMs} and was stopped after ${outcome.elapsedMs}ms. Simplify the query (correlated subqueries over edges/symbols are the usual cause) or raise timeoutMs (max 30000).`
+        );
+      case "busy":
+        throw new PolicyViolationError(
+          "QUERY_BUSY",
+          `query_graph: ${outcome.inFlight} queries are already running on this server; retry when one finishes.`
+        );
+      case "scope":
+        // A scope refusal is the caller's mistake, not a failed query, and its message is ours.
+        throw new McpError(ErrorCode.InvalidParams, outcome.message);
+      case "error":
+        throw failed(outcome.message);
+      case "crashed":
+        throw new McpError(ErrorCode.InternalError, `query_graph: ${outcome.message}. The query was not answered; retry it.`);
+    }
+  } else {
+    // Unit tests without a runner: the statement runs here and timeoutMs is only checked afterwards.
+    try {
+      result = store.runReadOnlyGraphQuery(allowlistCheck.sanitizedSql, boundParams, args.limit, args.timeoutMs);
+    } catch (err: unknown) {
+      if (err instanceof QueryGraphScopeError) {
+        throw new McpError(ErrorCode.InvalidParams, err.message);
+      }
+      throw failed(err instanceof Error ? err.message : String(err));
+    }
   }
 
   const { elapsedMs, timedOut: timeoutExceeded } = result;

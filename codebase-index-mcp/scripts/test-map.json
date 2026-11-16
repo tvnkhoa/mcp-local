@@ -241,6 +241,12 @@
       "@dist",
       "codebase-index-mcp/scripts/bundle.mjs"
     ],
+    "test:query-graph-timeout": [
+      "codebase-index-mcp/scripts/test/test-query-graph-timeout.mjs",
+      "@dist",
+      "codebase-index-mcp/src/tools/handlers/impactHandler.ts",
+      "codebase-index-mcp/scripts/bundle.mjs"
+    ],
     "test:index-lock-contention": [
       "codebase-index-mcp/scripts/test/test-index-lock-contention.mjs",
       "@dist",

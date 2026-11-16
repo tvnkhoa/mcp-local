@@ -260,7 +260,7 @@ export function buildSearchTools(deps: CodebaseIndexDeps): AnyToolDefinition[] {
     // true, so it must not be relaxed.
     annotations: readsGraph,
     rawResult: true,
-    handler: (input) => ok(raw(handleQueryGraph(input, buildContext())))
+    handler: async (input) => ok(raw(await handleQueryGraph(input, buildContext())))
   });
 
   return [

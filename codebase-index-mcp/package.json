@@ -69,6 +69,7 @@
     "test:impact-join-parity": "node scripts/test/test-impact-join-parity.mjs",
     "test:server-envelopes": "node scripts/test/test-server-envelopes.mjs",
     "test:sqlite-guardrails": "node scripts/test/test-sqlite-guardrails.mjs",
+    "test:query-graph-timeout": "node scripts/test/test-query-graph-timeout.mjs",
     "test:approval-token": "node scripts/test/test-approval-token.mjs",
     "test:route-map-roundtrip": "node scripts/test/test-route-map-roundtrip.mjs",
     "test:field-access-exact": "node scripts/test/test-field-access-exact.mjs",

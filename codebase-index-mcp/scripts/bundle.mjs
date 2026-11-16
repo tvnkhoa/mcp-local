@@ -31,7 +31,8 @@ export const ENTRIES = {
   refreshWorker: "services/indexing/refreshWorker.js",
   extractionWorker: "services/extractors/extractionWorker.js",
   fieldWorker: "services/typeResolution/fieldWorker.js",
-  vectorSearchWorker: "repositories/vectorSearchWorker.js"
+  vectorSearchWorker: "repositories/vectorSearchWorker.js",
+  queryGraphRunner: "repositories/queryGraphRunner.js"
 };
 
 export const EXTERNAL = [

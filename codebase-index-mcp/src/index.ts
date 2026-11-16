@@ -41,6 +41,7 @@ import {
 } from "./services/indexing/indexJobs.js";
 import { DEFAULT_ABORT_GRACE_MS, RefreshWorkerClient } from "./services/indexing/refreshWorkerClient.js";
 import { VectorSearchWorkerClient } from "./repositories/vectorSearchWorkerClient.js";
+import { QueryGraphRunnerClient } from "./repositories/queryGraphRunnerClient.js";
 import { newerBuildRefusal, versionEscalationFor } from "./services/indexing/runPolicy.js";
 import { INDEX_VERSION } from "./services/indexing/indexPipeline.js";
 import { armWatchInactivityTimer, startAutoWatchers } from "./services/watch/watchLifecycle.js";
@@ -209,6 +210,8 @@ const refreshWorker = new RefreshWorkerClient({
  */
 const vectorSearch = new VectorSearchWorkerClient(dbPath);
 store.onProcessCachesInvalidated(() => vectorSearch.invalidate());
+/** MCP-ISSUE-135: query_graph runs in a child process on a read-only connection, killed at its timeoutMs. */
+const queryGraphRunner = new QueryGraphRunnerClient(dbPath);
 // Release J: with the refresh worker writing the index, this thread's small commits must never run a
 // WAL checkpoint the worker's PASSIVE checkpoint left behind (a measured 473 ms stall at landing).
 store.setAutoCheckpointPages(0);
@@ -485,6 +488,7 @@ function buildHandlerContext(): HandlerContext {
     // Review 3-rest: remove_repository deletes through the writer, in the DB-wide queue.
     purgeRepository: purgeThroughWriter,
     vectorSearch: (repoId, text, k) => vectorSearch.search(repoId, text, k),
+    queryGraph: (sql, params, limit, timeoutMs) => queryGraphRunner.run(sql, params, limit, timeoutMs),
     asText,
     constants: {
       MAX_FILES_PER_RUN,
@@ -548,6 +552,12 @@ handle.lifecycle.onShutdown({
   name: "index-jobs",
   run: () => {
     indexJobs.dispose();
+  }
+});
+handle.lifecycle.onShutdown({
+  name: "query-graph-runner",
+  run: async () => {
+    await queryGraphRunner.dispose();
   }
 });
 handle.lifecycle.onShutdown({

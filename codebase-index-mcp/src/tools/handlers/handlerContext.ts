@@ -5,6 +5,7 @@ import type { ResponseProfile } from "../../middleware/responseFormatter.js";
 import type { IndexMode, IndexRunResult } from "../../types/index.js";
 import type { IndexJobQueue } from "../../services/indexing/indexJobs.js";
 import type { VectorSearchOutcome } from "../../repositories/vectorSearchWorkerClient.js";
+import type { QueryGraphOutcome } from "../../repositories/queryGraphRunnerClient.js";
 
 export interface HandlerConstants {
   MAX_FILES_PER_RUN: number;
@@ -69,6 +70,16 @@ export interface HandlerContext {
    * budget (vectorSearchWorkerClient.ts). Absent in handler unit tests: the answer then says `paddingSkipped`.
    */
   vectorSearch?: (repoId: string, text: string, k: number) => Promise<VectorSearchOutcome>;
+  /**
+   * MCP-ISSUE-135: `query_graph`'s statement, run in a child process that is killed at `timeoutMs`
+   * (queryGraphRunnerClient.ts). Absent in handler unit tests: the statement then runs on this thread.
+   */
+  queryGraph?: (
+    sql: string,
+    params: Record<string, string | number | boolean | null>,
+    limit: number,
+    timeoutMs: number
+  ) => Promise<QueryGraphOutcome>;
   constants: HandlerConstants;
   /**
    * R4: the HTTP client session of the call being handled. A refactor preview records it and only
