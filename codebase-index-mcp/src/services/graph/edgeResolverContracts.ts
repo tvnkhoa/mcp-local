@@ -20,6 +20,7 @@ import {
 import { immediateTransaction } from "../../repositories/sqliteTx.js";
 import { pickBestNamedCandidate } from "./edgeResolverShared.js";
 import { buildImportedFilesByFile, normalizeFilePath, pythonImportedFilesForName } from "./moduleResolution.js";
+import { planTypedDispatch } from "./edgeResolverCalls.js";
 
 /**
  * Fan out a call on an `abstract`/`virtual` base member to the overrides in its subclasses
@@ -64,8 +65,10 @@ export function resolveBaseClassDispatch(db: Database.Database, repoId: string):
       // return type, so the trailing space keeps `abstractPath` and `virtually` from matching. A dedicated
       // modifier column would be sturdier but needs a schema change and a full re-index of every repo.
       `
-      select distinct e.from_id as fromId, s.symbol_id as baseMethodId, s.name as memberName,
-             s.parent_symbol_id as baseTypeId
+      select e.from_id as fromId, s.symbol_id as baseMethodId, s.name as memberName,
+             s.parent_symbol_id as baseTypeId,
+             -- Row #10: 0 when every edge from this caller to the method is an interface-dispatch row.
+             max(coalesce(e.reason, '') <> 'interface-dispatch') as direct
       from edges e
       inner join symbols s on s.repo_id = e.repo_id and s.symbol_id = e.to_id
       where e.repo_id = ?
@@ -74,10 +77,11 @@ export function resolveBaseClassDispatch(db: Database.Database, repoId: string):
         and s.parent_symbol_id is not null
         and s.signature is not null
         and (s.signature like '%abstract %' or s.signature like '%virtual %')
+      group by e.from_id, s.symbol_id
       order by e.from_id, s.symbol_id
       `
     )
-    .all(repoId) as { fromId: string; baseMethodId: string; memberName: string; baseTypeId: string }[];
+    .all(repoId) as { fromId: string; baseMethodId: string; memberName: string; baseTypeId: string; direct: number }[];
 
   if (virtualCalls.length === 0) return 0;
 
@@ -141,10 +145,32 @@ export function resolveBaseClassDispatch(db: Database.Database, repoId: string):
      where not exists (select 1 from edges where repo_id = ? and from_id = ? and to_id = ? and type = 'CALLS')`
   );
 
+  // Row #10 (MCP-ISSUE-133): a call that reaches a virtual method ONLY through interface dispatch runs on the
+  // implementer that dispatched it — an implementer that inherits `Base.M` — so the overrides that can run are
+  // in THAT implementer's subclasses, not in every subclass of `Base`. Fanning out from `Base` sent every
+  // `ICampaignRepository.Update` caller on wec.social-ads to `MetaAudienceRepository.Update` (31 edges), though
+  // the receiver is a `CampaignRepository`. When the implementer owns the method itself, it IS `Base` and the
+  // fan-out is the one it always was. Built only when such a call exists; a dispatch row the plan does not
+  // explain (Python's own lane) keeps the old fan-out.
+  let dispatchedBy: Map<string, string[]> | undefined;
+  const dispatchers = (fromId: string, methodId: string): string[] | undefined => {
+    if (!dispatchedBy) {
+      dispatchedBy = new Map();
+      for (const d of planTypedDispatch(db, repoId)) {
+        const key = overrideKey(d.fromId, d.targetId);
+        const list = dispatchedBy.get(key);
+        if (!list) dispatchedBy.set(key, [d.implId]);
+        else if (!list.includes(d.implId)) list.push(d.implId);
+      }
+    }
+    return dispatchedBy.get(overrideKey(fromId, methodId));
+  };
+
   let count = 0;
   const tx = immediateTransaction(db, () => {
     for (const call of virtualCalls) {
-      const files = (subclassFilesByBaseId.get(call.baseTypeId) ?? []).slice(0, MAX_SUBCLASS_DISPATCH_FANOUT);
+      const bases = call.direct ? [call.baseTypeId] : (dispatchers(call.fromId, call.baseMethodId) ?? [call.baseTypeId]);
+      const files = [...new Set(bases.flatMap((b) => (subclassFilesByBaseId.get(b) ?? []).slice(0, MAX_SUBCLASS_DISPATCH_FANOUT)))];
       for (const filePath of files) {
         const overrideId = overrideByFileAndName.get(overrideKey(filePath, call.memberName));
         if (overrideId === undefined || overrideId === call.baseMethodId) continue;

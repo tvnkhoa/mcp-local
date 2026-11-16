@@ -161,7 +161,10 @@ export type RunIndexInput = {
 // languages) and MCP-ISSUE-128's last Python items (a Protocol subclass EXTENDS the Protocol, `Outer.Inner(x)` binds
 // the nested class, a Protocol signature fits by class hierarchy): CALLS / EXTENDS / IMPLEMENTS targets change for
 // unchanged files, so existing indexes must re-resolve on a FULL run.
-export const INDEX_VERSION = "v17-owner-dispatch-py-protocols";
+// v18: MCP-ISSUE-133 row #10 — interface dispatch reaches a method the implementer INHERITS from an in-repo base
+// class (`class Impl : Base, IFoo`, the most-derived declaration up the EXTENDS chain): interface-dispatch CALLS
+// change for unchanged files, so existing indexes must re-resolve on a FULL run.
+export const INDEX_VERSION = "v18-inherited-dispatch";
 
 /**
  * Release J: files whose change alters how every other file resolves — module resolution (tsconfig paths,

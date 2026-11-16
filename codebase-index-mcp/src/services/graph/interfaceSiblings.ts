@@ -91,7 +91,8 @@ export function expandInterfaceSiblingsImpl(
         )
         .all(repoId, parent.symbolId, `iface:${parent.name}`, IMPLEMENTOR_CAP) as { symbolId: string; filePath: string }[];
       for (const impl of implementors) {
-        const sibling = findMemberMethod(db, repoId, impl.symbolId, impl.filePath, method.name, method.signature);
+        const sibling = findMemberMethod(db, repoId, impl.symbolId, impl.filePath, method.name, method.signature)
+          ?? findInheritedMemberMethod(db, repoId, impl.symbolId, method.name, method.signature);
         if (sibling) add(sibling, "interface");
       }
     } else {
@@ -229,6 +230,57 @@ export function pickOwnedMethod<T extends MemberCandidate>(
   return pool[0];
 }
 
+/** MCP-ISSUE-133 (row #10): a class's in-repo base class and the file that declares it. */
+export type ClassBase = { baseId: string; filePath: string };
+
+/** How far up a base chain dispatch looks — a guard against bad data, not a real hierarchy depth. */
+const MAX_BASE_CHAIN = 16;
+
+/**
+ * MCP-ISSUE-133 (row #10): the method `name` an implementer RUNS — its own declaration, else the first one up its
+ * in-repo base chain (`class Impl : Base, IFoo` where only `Base` declares the method). Walking upward from the
+ * implementer, the most-derived declaration wins, so an override in the middle of the chain beats the abstract
+ * root. Every step binds by owner exactly as `pickOwnedMethod` does; a cycle or a chain past MAX_BASE_CHAIN stops.
+ */
+export function pickInheritedMethod<T extends MemberCandidate>(
+  candidates: readonly T[],
+  baseOf: (typeId: string) => ClassBase | undefined,
+  ownerId: string,
+  ownerFile: string,
+  name: string,
+  arity: number | null
+): T | undefined {
+  const seen = new Set<string>();
+  let type: ClassBase | undefined = { baseId: ownerId, filePath: ownerFile };
+  for (let depth = 0; type && depth <= MAX_BASE_CHAIN && !seen.has(type.baseId); depth++) {
+    seen.add(type.baseId);
+    const own = pickOwnedMethod(candidates, type.baseId, type.filePath, name, arity);
+    if (own) return own;
+    type = baseOf(type.baseId);
+  }
+  return undefined;
+}
+
+/**
+ * The first resolved in-repo base class of `classId` (rowid = extraction order), or undefined. Python classes
+ * are skipped: their dispatch walks the C3 MRO in edgeResolverCalls, not this single chain.
+ */
+function classBaseOf(db: Database.Database, repoId: string, classId: string): ClassBase | undefined {
+  return db
+    .prepare(
+      `select e.to_id as baseId, b.file_path as filePath
+       from edges e
+       inner join symbols c on c.repo_id = e.repo_id and c.symbol_id = e.from_id
+       inner join symbols b on b.repo_id = e.repo_id and b.symbol_id = e.to_id
+       where e.repo_id = ? and e.from_id = ? and e.type = 'EXTENDS' and e.to_id not like 'base:%'
+         and b.kind in ('class', 'struct', 'record', 'record struct')
+         and lower(c.file_path) not like '%.py' and lower(c.file_path) not like '%.pyi'
+       order by e.rowid
+       limit 1`
+    )
+    .get(repoId, classId) as ClassBase | undefined;
+}
+
 /** Method `name` thuộc type `typeSymbolId` — parent linkage; name+file only for rows with no parent (MCP-ISSUE-133). */
 function findMemberMethod(
   db: Database.Database,
@@ -248,4 +300,26 @@ function findMemberMethod(
     )
     .all(repoId, name, typeSymbolId, typeFilePath) as MemberCandidate[];
   return pickOwnedMethod(rows, typeSymbolId, typeFilePath, name, parameterCount(sourceSignature, name))?.symbolId ?? null;
+}
+
+/** MCP-ISSUE-133 (row #10): `name` declared up `typeSymbolId`'s in-repo base chain — what dispatch binds, too. */
+function findInheritedMemberMethod(
+  db: Database.Database,
+  repoId: string,
+  typeSymbolId: string,
+  name: string,
+  sourceSignature: string | null
+): string | null {
+  const first = classBaseOf(db, repoId, typeSymbolId);
+  if (!first) return null;
+  // Same row order as the dispatch rebuild's per-name list, so both pick the same overload.
+  const rows = db
+    .prepare(
+      `select symbol_id as symbolId, file_path as filePath, parent_symbol_id as parentSymbolId, signature from symbols
+       where repo_id = ? and name = ? and kind = 'method'
+       order by file_path, symbol_id`
+    )
+    .all(repoId, name) as MemberCandidate[];
+  const baseOf = (id: string) => classBaseOf(db, repoId, id);
+  return pickInheritedMethod(rows, baseOf, first.baseId, first.filePath, name, parameterCount(sourceSignature, name))?.symbolId ?? null;
 }
