@@ -308,6 +308,28 @@ try {
   )).map((r) => r.k).sort();
   assert(JSON.stringify(nestedInitBlink) === JSON.stringify([`Other.Inner.__init__->Lamp.blink:${CALLER_TYPED}`, `Outer.Inner.__init__->Led.blink:${CALLER_TYPED}`]),
     "#3 the constructor arguments type each Inner.__init__'s `light` (Led for Outer.Inner, Lamp for Other.Inner)", nestedInitBlink);
+  // ISSUE-128 (row #3b): `Box.Item(x)` with Box IMPORTED — the call pass falls back to the class nested in Box.
+  const USE = "src/flow/hops/nested_use.py", BOX = "src/flow/hops/nested_box.py";
+  const boxCtor = edges.filter((e) => e.type === "CALLS" && e.fromFile === USE && e.fromName === "build_box")
+    .map((e) => `${e.toParent ?? ""}.${e.toName ?? e.toId}@${e.toFile ?? ""}:${e.toKind ?? ""}:${e.reason}`).sort();
+  assert(boxCtor.includes(`Box.Item@${BOX}:class:resolved callee by receiver type`),
+    "#3b Box.Item(Lamp()) with Box imported → the class Box.Item (was an external-boundary token)", boxCtor);
+  assert(!boxCtor.some((k) => k.includes("callee:Box.Item")), "#3b no `callee:Box.Item` token is left unresolved", boxCtor);
+  const boxInitBlink = edges.filter((e) => e.type === "CALLS" && e.fromFile === BOX && e.fromName === "__init__" && e.toName === "blink")
+    .map((e) => `${e.toParent}.${e.toName}:${e.reason}`).sort();
+  assert(JSON.stringify(boxInitBlink) === JSON.stringify([`Lamp.blink:${CALLER_TYPED}`]),
+    "#3b the cross-file constructor argument types Box.Item.__init__'s `light` (Lamp)", boxInitBlink);
+  // ISSUE-128 leftover 6 (row #3b): a parameter may be wider and a return narrower than the Protocol's.
+  const FEEDS = "src/flow/feeds.py";
+  const feeds = (from) => edges.some((e) => e.type === "IMPLEMENTS" && e.fromName === from && e.toName === "Feeder" && e.toFile === FEEDS);
+  assert(feeds("WideFeeder"), "#3b item 6: feed(item: Food) -> Steak fits Feeder.feed(item: Meat) -> Meat (wider param, narrower return)",
+    show((e) => e.type === "IMPLEMENTS" && e.toName === "Feeder"));
+  assert(!feeds("NarrowFeeder"), "#3b item 6: a NARROWER parameter (Steak for Meat) does not fit");
+  assert(!feeds("WideReturnFeeder"), "#3b item 6: a WIDER return (Food for Meat) does not fit");
+  assert(!feeds("StoneFeeder"), "#3b item 6: an unrelated parameter type (Stone) does not fit");
+  const serveTo = edges.filter((e) => e.type === "CALLS" && e.fromName === "serve" && e.fromFile === FEEDS && e.reason === "interface-dispatch")
+    .map((e) => e.toParent).sort();
+  assert(JSON.stringify(serveTo) === JSON.stringify(["WideFeeder"]), "#3b item 6: feeder.feed() dispatches to WideFeeder.feed only", serveTo);
   // review #4: C3, not breadth-first.
   const mroM = edges.filter((e) => e.type === "CALLS" && e.fromName === "use_mro" && e.toName === "m");
   assert(mroM.length === 1 && mroM[0].toParent === "A", "review #4: d.m() with class D(B, C), class B(A) → A.m (C3), not C.m (breadth-first)", mroM);
