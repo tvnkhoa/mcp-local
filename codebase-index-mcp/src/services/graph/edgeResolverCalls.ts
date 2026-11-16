@@ -21,6 +21,7 @@ import {
   stripGenerics,
 } from "../../repositories/vectorStore.js";
 import { buildNamedCandidateMap, pickBestNamedCandidate } from "./edgeResolverShared.js";
+import { parameterCount, pickOwnedMethod, type MemberCandidate } from "./interfaceSiblings.js";
 import { buildImportedFilesByFile, isPythonFile, normalizeFilePath, pythonImportedFilesForName } from "./moduleResolution.js";
 import { immediateTransaction } from "../../repositories/sqliteTx.js";
 import { PYTHON_ARGS_HINT, PYTHON_RECEIVER_HINT } from "../extractors/pythonNoise.js";
@@ -284,7 +285,11 @@ type NamedCandidate = { symbolId: string; filePath: string; kind: string; parent
  */
 const pythonLookups = new WeakMap<
   CallResolutionContext["candidateMap"],
-  { classes: (name: string) => NamedCandidate[]; methodsByParent: (name: string) => Map<string, NamedCandidate> }
+  {
+    classes: (name: string) => NamedCandidate[];
+    methodsByParent: (name: string) => Map<string, NamedCandidate>;
+    nestedClassesByParent: (name: string) => Map<string, NamedCandidate>;
+  }
 >();
 
 function pythonLookupFor(candidateMap: CallResolutionContext["candidateMap"]) {
@@ -292,6 +297,7 @@ function pythonLookupFor(candidateMap: CallResolutionContext["candidateMap"]) {
   if (!lookup) {
     const classesByName = new Map<string, NamedCandidate[]>();
     const methodsByName = new Map<string, Map<string, NamedCandidate>>();
+    const nestedByName = new Map<string, Map<string, NamedCandidate>>();
     lookup = {
       classes: (name) => {
         let list = classesByName.get(name);
@@ -312,6 +318,17 @@ function pythonLookupFor(candidateMap: CallResolutionContext["candidateMap"]) {
           methodsByName.set(name, byParent);
         }
         return byParent;
+      },
+      nestedClassesByParent: (name) => {
+        let byParent = nestedByName.get(name);
+        if (!byParent) {
+          byParent = new Map<string, NamedCandidate>();
+          for (const c of candidateMap.get(name) ?? []) {
+            if (c.kind === "class" && c.parentSymbolId && !byParent.has(c.parentSymbolId)) byParent.set(c.parentSymbolId, c);
+          }
+          nestedByName.set(name, byParent);
+        }
+        return byParent;
       }
     };
     pythonLookups.set(candidateMap, lookup);
@@ -325,8 +342,8 @@ const MAX_PYTHON_MRO_CLASSES = 16;
 /**
  * PY-3: `Owner.member` for a Python caller. The owner is the class named `Owner` the caller can see
  * (same file, then an imported file, then the tie-break), and the member the method of that name declared
- * on it or — breadth-first, in base-list order, like a simple MRO — on one of its resolved bases.
- * Undefined when the owner is not a repo class or no class on the chain declares the member.
+ * on it or — in C3 order — on one of its resolved bases; failing that, a class of that name nested in one of
+ * them (`Outer.Inner(x)`). Undefined when the owner is not a repo class or nothing on the chain declares the member.
  */
 export function resolvePythonQualifiedCall(
   ctx: Pick<CallResolutionContext, "candidateMap" | "basesByClassId">,
@@ -342,8 +359,12 @@ export function resolvePythonQualifiedCall(
   const owner = pickBestNamedCandidate(lookup.classes(ownerName), fromFile, ["class"], importedFiles);
   if (!owner) return undefined;
   const members = lookup.methodsByParent(memberName);
-  if (members.size === 0) return undefined;
-  return pythonMemberOnChain(members, ctx.basesByClassId, owner.symbolId);
+  const method = members.size > 0 ? pythonMemberOnChain(members, ctx.basesByClassId, owner.symbolId) : undefined;
+  if (method) return method;
+  // ISSUE-128: `Outer.Inner(x)` constructs a class nested in Outer (or in a base on its MRO, as attribute
+  // lookup finds it). The extractor binds this itself only for a same-file Outer; an imported one lands here.
+  const nested = lookup.nestedClassesByParent(memberName);
+  return nested.size > 0 ? pythonMemberOnChain(nested, ctx.basesByClassId, owner.symbolId) : undefined;
 }
 
 /**
@@ -585,11 +606,10 @@ export function resolveCallEdgesBatch(
           const memberCandidates = candidateMap.get(memberName) ?? [];
           // PY-5 review: a Python file often holds a Protocol and a class with the same method name
           // (`Executor.close` beside `Store.close`); the file match alone picked whichever id sorted first.
-          // The owner link decides for Python; C# keeps the file match unchanged.
+          // The owner link decides. MCP-ISSUE-133: for C#/TS too — a file declaring two interfaces with a
+          // same-named member gave every call the first one's; the file match stays for rows with no owner link.
           const ifaceMethod =
-            (isPythonFile(iface.filePath)
-              ? memberCandidates.find((c) => c.kind === "method" && c.parentSymbolId === iface.symbolId)
-              : undefined) ??
+            memberCandidates.find((c) => c.kind === "method" && c.parentSymbolId === iface.symbolId) ??
             memberCandidates.find((c) => c.filePath === iface.filePath && c.kind === "method");
           if (ifaceMethod) {
             match = ifaceMethod;
@@ -828,16 +848,17 @@ export function rebuildInterfaceDispatchEdges(db: Database.Database, repoId: str
   rebuildPythonUntypedReceiverEdges(db, repoId);
   const calls = db
     .prepare(
-      `select distinct e.from_id as fromId, s.symbol_id as methodId, s.name as name, s.parent_symbol_id as ifaceId
+      `select distinct e.from_id as fromId, s.symbol_id as methodId, s.name as name, s.parent_symbol_id as ifaceId, s.signature as signature
        from edges e
        inner join symbols s on s.repo_id = e.repo_id and s.symbol_id = e.to_id
        inner join symbols i on i.repo_id = s.repo_id and i.symbol_id = s.parent_symbol_id and i.kind = 'interface'
        where e.repo_id = ? and e.type = 'CALLS' and e.reason in (?, ?) and s.kind = 'method'
        order by e.from_id, s.symbol_id`
     )
-    .all(repoId, INTERFACE_METHOD_REASON, INTERFACE_METHOD_UNPROVEN_REASON) as { fromId: string; methodId: string; name: string; ifaceId: string }[];
+    .all(repoId, INTERFACE_METHOD_REASON, INTERFACE_METHOD_UNPROVEN_REASON) as { fromId: string; methodId: string; name: string; ifaceId: string; signature: string | null }[];
   if (calls.length === 0) return 0;
-  const implementorFiles = new Map<string, string[]>();
+  /** MCP-ISSUE-133: implementer TYPES per interface (not their files) — a file can hold several types. */
+  const implementors = new Map<string, { implId: string; filePath: string }[]>();
   /** PY-6: Python implementer class ids per interface — Python files often hold several implementers. */
   const pythonImplementors = new Map<string, string[]>();
   for (const r of db
@@ -855,13 +876,26 @@ export function rebuildInterfaceDispatchEdges(db: Database.Database, repoId: str
       else pythonImplementors.set(r.ifaceId, [r.implId]);
       continue;
     }
-    const list = implementorFiles.get(r.ifaceId);
-    // Rows are ordered by (iface, file), so skipping a repeat of the last file keeps the old
-    // `distinct (iface, file)` list exactly, now that the row also carries the implementer id.
-    if (list) {
-      if (list[list.length - 1] !== r.filePath) list.push(r.filePath);
-    } else implementorFiles.set(r.ifaceId, [r.filePath]);
+    const list = implementors.get(r.ifaceId);
+    if (list) list.push({ implId: r.implId, filePath: r.filePath });
+    else implementors.set(r.ifaceId, [{ implId: r.implId, filePath: r.filePath }]);
   }
+  // MCP-ISSUE-133: same-named method rows with their owner and signature, per name, ordered like the
+  // candidate map (file, id) so the pick among equals is the one it always was.
+  const methodRowsStmt = db.prepare(
+    `select symbol_id as symbolId, file_path as filePath, parent_symbol_id as parentSymbolId, signature from symbols
+     where repo_id = ? and name = ? and kind = 'method'
+     order by file_path, symbol_id`
+  );
+  const methodRowsByName = new Map<string, MemberCandidate[]>();
+  const methodRows = (name: string): MemberCandidate[] => {
+    let rows = methodRowsByName.get(name);
+    if (!rows) {
+      rows = methodRowsStmt.all(repoId, name) as MemberCandidate[];
+      methodRowsByName.set(name, rows);
+    }
+    return rows;
+  };
   const candidateMap = buildNamedCandidateMap(db, repoId, ["function", "method", "constructor", "class"]);
   // PY-5b: the base chains the Python fan-out walks — only built when a Protocol has implementers.
   const pythonBases = pythonImplementors.size > 0
@@ -875,8 +909,16 @@ export function rebuildInterfaceDispatchEdges(db: Database.Database, repoId: str
   let count = 0;
   const tx = immediateTransaction(db, () => {
     for (const call of calls) {
-      for (const filePath of (implementorFiles.get(call.ifaceId) ?? []).slice(0, MAX_INTERFACE_DISPATCH_FANOUT)) {
-        const impl = (candidateMap.get(call.name) ?? []).find((c) => c.filePath === filePath && c.kind === "method");
+      // MCP-ISSUE-133: the method the implementer TYPE declares, the overload with the interface method's
+      // arity — this used to take the first same-named method in the implementer's FILE, which on a file with
+      // a helper type, a nested type or a second implementer is another type's method.
+      // The cap still counts FILES, as it always has: counting types instead changed which implementers survive
+      // it (wec.communication-hub: `ISender`, 11 implementers in 6 files) — every type in a capped file is reached.
+      const arity = parameterCount(call.signature, call.name);
+      const listed = implementors.get(call.ifaceId) ?? [];
+      const cappedFiles = new Set([...new Set(listed.map((i) => i.filePath))].slice(0, MAX_INTERFACE_DISPATCH_FANOUT));
+      for (const { implId, filePath } of listed.filter((i) => cappedFiles.has(i.filePath))) {
+        const impl = pickOwnedMethod(methodRows(call.name), implId, filePath, call.name, arity);
         if (!impl || impl.symbolId === call.methodId) continue;
         count += insert.run(repoId, call.fromId, impl.symbolId, repoId, call.fromId, impl.symbolId).changes;
       }
@@ -1179,7 +1221,8 @@ export function rebuildPythonProtocolImplements(db: Database.Database, repoId: s
   }
   const byId = new Map(types.map((t) => [t.symbolId, t]));
 
-  const methodsByOwner = new Map<string, Map<string, string | null>>();
+  type Member = { sig: string | null; ownerId: string };
+  const methodsByOwner = new Map<string, Map<string, Member>>();
   for (const m of db
     .prepare(
       `select name, parent_symbol_id as ownerId, signature from symbols
@@ -1190,8 +1233,9 @@ export function rebuildPythonProtocolImplements(db: Database.Database, repoId: s
     .all(repoId) as { name: string; ownerId: string; signature: string | null }[]) {
     if (!byId.has(m.ownerId)) continue;
     const map = methodsByOwner.get(m.ownerId);
-    if (!map) methodsByOwner.set(m.ownerId, new Map([[m.name, m.signature]]));
-    else if (!map.has(m.name)) map.set(m.name, m.signature);
+    const member = { sig: m.signature, ownerId: m.ownerId };
+    if (!map) methodsByOwner.set(m.ownerId, new Map([[m.name, member]]));
+    else if (!map.has(m.name)) map.set(m.name, member);
   }
 
   const importedFilesByFile = buildImportedFilesByFile(db, repoId);
@@ -1233,17 +1277,48 @@ export function rebuildPythonProtocolImplements(db: Database.Database, repoId: s
   };
 
   const protocols = types.filter((t) => t.kind === "interface");
-  const required = new Map<string, Map<string, string | null>>();
+  const required = new Map<string, Map<string, Member>>();
   for (const p of protocols) {
-    const members = new Map<string, string | null>();
+    const members = new Map<string, Member>();
     for (const id of ancestry(p.symbolId)) {
       if (byId.get(id)?.kind !== "interface") continue;
-      for (const [n, sig] of methodsByOwner.get(id) ?? []) if (!PROTOCOL_IGNORED_MEMBERS.has(n) && !members.has(n)) members.set(n, sig);
+      for (const [n, member] of methodsByOwner.get(id) ?? []) if (!PROTOCOL_IGNORED_MEMBERS.has(n) && !members.has(n)) members.set(n, member);
     }
     required.set(p.symbolId, members);
   }
   // Built once: the class × Protocol loop below reads each list many times.
   const requiredList = new Map([...required].map(([id, members]) => [id, [...members]] as const));
+
+  // ISSUE-128 leftover 6: a differently-named annotation can still fit — an implementer parameter may be WIDER
+  // than the Protocol's (`x: Base` for `x: Sub`), its return NARROWER. "Wider" is read off the in-repo C3 MRO of
+  // the call lane's own bases (`buildPythonBases`), each name bound from the file that writes it. Built on the
+  // first differing pair only: most repos never get there.
+  let pyBases: Map<string, string[]> | null = null;
+  const typeIdCache = new Map<string, string | null>();
+  const typeIdFrom = (name: string, file: string): string | null => {
+    const key = `${file}\u0000${name}`;
+    let id = typeIdCache.get(key);
+    if (id === undefined) {
+      const picked = pickBestNamedCandidate(byName.get(name) ?? [], file, ["class", "interface"],
+        pythonImportedFilesForName(importedFilesByFile, normalizeFilePath(file), name));
+      id = picked?.symbolId ?? null;
+      typeIdCache.set(key, id);
+    }
+    return id;
+  };
+  /** Is `sub` (named in subFile) the type `sup` (named in supFile) or one of its in-repo subclasses? */
+  const isSubtype = (sub: string, subFile: string, sup: string, supFile: string): boolean => {
+    const subId = typeIdFrom(sub, subFile);
+    const supId = typeIdFrom(sup, supFile);
+    if (!subId || !supId) return false;
+    pyBases ??= buildPythonBases(db, repoId, buildNamedCandidateMap(db, repoId, ["function", "method", "constructor", "class"]), importedFilesByFile);
+    return pythonMro(pyBases, subId).includes(supId);
+  };
+  const fileOf = (ownerId: string) => byId.get(ownerId)?.filePath ?? "";
+  const fits = (proto: Member, impl: Member) => (pair: AnnotationPair) =>
+    pair.position === "param"
+      ? isSubtype(pair.proto, fileOf(proto.ownerId), pair.impl, fileOf(impl.ownerId))
+      : isSubtype(pair.impl, fileOf(impl.ownerId), pair.proto, fileOf(proto.ownerId));
 
   const insert = db.prepare(
     `insert into edges (repo_id, from_id, to_id, type, confidence, reason)
@@ -1259,8 +1334,8 @@ export function rebuildPythonProtocolImplements(db: Database.Database, repoId: s
       // A Protocol listed as a base also implements the Protocols it extends.
       for (const id of [...explicit]) for (const up of ancestry(id)) if (byId.get(up)?.kind === "interface") explicit.add(up);
       // First along the chain wins, as attribute lookup does.
-      const available = new Map<string, string | null>();
-      for (const id of chain) for (const [n, sig] of methodsByOwner.get(id) ?? []) if (!available.has(n)) available.set(n, sig);
+      const available = new Map<string, Member>();
+      for (const id of chain) for (const [n, member] of methodsByOwner.get(id) ?? []) if (!available.has(n)) available.set(n, member);
       for (const p of protocols) {
         let reason: string | null = null;
         let confidence = 0;
@@ -1270,7 +1345,10 @@ export function rebuildPythonProtocolImplements(db: Database.Database, repoId: s
         } else {
           const members = requiredList.get(p.symbolId) ?? [];
           // PY-6: a name match alone made every class with a `run` a Stage; the signature must fit too.
-          if (members.length > 0 && members.every(([n, sig]) => available.has(n) && pythonSignaturesCompatible(sig, available.get(n) ?? null))) {
+          if (members.length > 0 && members.every(([n, member]) => {
+            const impl = available.get(n);
+            return impl !== undefined && pythonSignaturesCompatible(member.sig, impl.sig, fits(member, impl));
+          })) {
             reason = PROTOCOL_STRUCTURAL_REASON;
             confidence = 0.8;
           }
@@ -1354,8 +1432,14 @@ function topLevelIndex(text: string, needle: string): number {
 
 const ANNOTATION_WRAPPER = /^(?:typing\.)?(?:Optional|Annotated|Final|ClassVar)\[(.*)\]$/;
 
-/** `Optional[pkg.Foo]` → `Foo`; quotes, `| None` and a module path ignored. Null means "says nothing". */
+/** `Optional[pkg.Foo]` → `foo`; quotes, `| None` and a module path ignored. Null means "says nothing". */
 function annotationHead(annotation: string | null): string | null {
+  // `List[X]` and `list[X]` are the same type.
+  return annotationName(annotation)?.toLowerCase() ?? null;
+}
+
+/** `Optional[pkg.Foo]` → `Foo`, case kept (a class name to look up); null for none / Any / object / a TypeVar. */
+function annotationName(annotation: string | null): string | null {
   if (!annotation) return null;
   let t = annotation.replace(/["']/g, "").trim();
   const union = t.split("|").map((x) => x.trim()).filter((x) => x !== "None");
@@ -1365,18 +1449,25 @@ function annotationHead(annotation: string | null): string | null {
   const head = (t.split("[")[0] ?? "").trim().split(".").pop() ?? "";
   // A TypeVar by convention (`T`, `TKey`, `T_co`) binds to anything: a generic Protocol's `x: T` fits `x: int`.
   if (!head || head === "Any" || head === "object" || TYPEVAR_NAME.test(head)) return null;
-  // `List[X]` and `list[X]` are the same type.
-  return head.toLowerCase();
+  return head;
 }
+
+/** Two differently-named annotations at one position, for `pythonSignaturesCompatible`'s `fits` hook. */
+export type AnnotationPair = { position: "param" | "return"; proto: string; impl: string };
 
 const TYPEVAR_NAME = /^(?:[A-Z]|T[A-Z0-9_]\w*|\w+_(?:co|contra))$/;
 
 /**
  * PY-6: can an implementer method stand in for a Protocol member? Positional arity must fit (an implementer
  * with `*args` takes any), and where both sides annotate a parameter or the return, the annotated class
- * names must agree. An unreadable signature is not evidence against.
+ * names must agree — or, given `fits`, fit: ISSUE-128 leftover 6, a parameter may be wider and a return narrower
+ * (the caller answers from the class hierarchy). An unreadable signature is not evidence against.
  */
-export function pythonSignaturesCompatible(protocolSig: string | null, implSig: string | null): boolean {
+export function pythonSignaturesCompatible(
+  protocolSig: string | null,
+  implSig: string | null,
+  fits?: (pair: AnnotationPair) => boolean
+): boolean {
   const proto = parsePythonSignature(protocolSig);
   const impl = parsePythonSignature(implSig);
   if (!proto || !impl) return true;
@@ -1387,11 +1478,14 @@ export function pythonSignaturesCompatible(protocolSig: string | null, implSig: 
   if (!implVarArgs && implPos.length < protoPos.length) return false;
   if (implPos.filter((x) => !x.hasDefault).length > protoPos.length) return false;
   for (let i = 0; i < Math.min(protoPos.length, implPos.length); i += 1) {
-    const a = annotationHead(protoPos[i]!.annotation);
-    const b = annotationHead(implPos[i]!.annotation);
-    if (a && b && a !== b) return false;
+    if (!annotationsFit("param", protoPos[i]!.annotation, implPos[i]!.annotation, fits)) return false;
   }
-  const ra = annotationHead(proto.returns);
-  const rb = annotationHead(impl.returns);
-  return !(ra && rb && ra !== rb);
+  return annotationsFit("return", proto.returns, impl.returns, fits);
+}
+
+function annotationsFit(position: AnnotationPair["position"], protoAnn: string | null, implAnn: string | null, fits?: (pair: AnnotationPair) => boolean): boolean {
+  const a = annotationName(protoAnn);
+  const b = annotationName(implAnn);
+  if (!a || !b || a.toLowerCase() === b.toLowerCase()) return true;
+  return fits?.({ position, proto: a, impl: b }) ?? false;
 }

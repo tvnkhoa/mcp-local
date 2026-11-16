@@ -162,10 +162,11 @@ test("release F: an older build refuses to write over a newer build, never the o
   // doc mentions keep no pick, MCP-ISSUE-089) was 12; release L (superseded SQL mention candidates, the EF
   // snapshot lane, MCP-ISSUE-090/092) was 13; release M (sql_drop sites, the EF migration Sql lane, enriched index
   // signatures) was 14; MCP-ISSUE-101 part 4 (ties break on the file path) was 15; the tree-sitter Python
-  // lane (PY-1..PY-4) is 16.
-  assert.equal(indexGeneration(INDEX_VERSION), 16);
-  assert.equal(newerBuildRefusal("v15-tiebreak-path", INDEX_VERSION), null, "v16 upgrades a v15 index");
-  assert.ok((newerBuildRefusal(INDEX_VERSION, "v15-tiebreak-path") ?? "").includes(INDEX_VERSION), "a v15 build refuses to write over a v16 index");
+  // lane (PY-1..PY-4) was 16; owner-keyed interface dispatch and the last Python Protocol items
+  // (MCP-ISSUE-133 / MCP-ISSUE-128) are 17.
+  assert.equal(indexGeneration(INDEX_VERSION), 17);
+  assert.equal(newerBuildRefusal("v16-python-tree-sitter", INDEX_VERSION), null, "v17 upgrades a v16 index");
+  assert.ok((newerBuildRefusal(INDEX_VERSION, "v16-python-tree-sitter") ?? "").includes(INDEX_VERSION), "a v16 build refuses to write over a v17 index");
 });
 
 test("release I1b: only a full run or a bulk resolve drops the DB-wide edge indexes", () => {

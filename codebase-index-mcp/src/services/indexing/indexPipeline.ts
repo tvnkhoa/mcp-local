@@ -157,7 +157,11 @@ export type RunIndexInput = {
 // v16: PY-1..PY-4 — the Python lane moved from regex to tree-sitter-python (methods with owners, EXTENDS,
 // CALLS, every imported name with its relative level) and Python imports resolve to files: every .py file
 // extracts differently, so existing indexes must re-extract.
-export const INDEX_VERSION = "v16-python-tree-sitter";
+// v17: 16 Nov resolver changes — MCP-ISSUE-133 (interface dispatch binds the implementer TYPE's own method, all
+// languages) and MCP-ISSUE-128's last Python items (a Protocol subclass EXTENDS the Protocol, `Outer.Inner(x)` binds
+// the nested class, a Protocol signature fits by class hierarchy): CALLS / EXTENDS / IMPLEMENTS targets change for
+// unchanged files, so existing indexes must re-resolve on a FULL run.
+export const INDEX_VERSION = "v17-owner-dispatch-py-protocols";
 
 /**
  * Release J: files whose change alters how every other file resolves — module resolution (tsconfig paths,

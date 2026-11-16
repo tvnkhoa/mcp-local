@@ -196,3 +196,21 @@ test("a traversal standing on an unproven interface edge cannot report high conf
   assert.notEqual(block.confidence, "high");
   assert.ok(block.knownGaps.some((g) => g.includes("NAME only")));
 });
+
+// ISSUE-128 leftover 6: differently-named annotations defer to the caller's hierarchy check.
+test("pythonSignaturesCompatible: a differing annotation fits only when `fits` says so, per position", async () => {
+  const { pythonSignaturesCompatible } = await import("./edgeResolverCalls.js");
+  const proto = "def feed(self, item: Meat) -> Meat";
+  const impl = "def feed(self, item: Food) -> Steak";
+  assert.equal(pythonSignaturesCompatible(proto, impl), false, "no hook: a differing name is a mismatch, as before");
+  const seen: string[] = [];
+  const fits = (p: { position: string; proto: string; impl: string }) => {
+    seen.push(`${p.position}:${p.proto}/${p.impl}`);
+    return (p.position === "param" && p.impl === "Food") || (p.position === "return" && p.impl === "Steak");
+  };
+  assert.equal(pythonSignaturesCompatible(proto, impl, fits), true);
+  assert.deepEqual(seen, ["param:Meat/Food", "return:Meat/Steak"], "names keep their case and position");
+  assert.equal(pythonSignaturesCompatible(proto, "def feed(self, item: Steak) -> Meat", fits), false, "the hook said no");
+  assert.equal(pythonSignaturesCompatible("def f(self, x: List[int])", "def f(self, x: list)", () => false), true, "List/list stays a case-insensitive match");
+  assert.equal(pythonSignaturesCompatible("def f(self, x: Optional[pkg.Meat])", "def f(self, x: Meat)", () => false), true, "wrappers and module paths ignored");
+});

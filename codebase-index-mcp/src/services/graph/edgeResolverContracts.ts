@@ -18,6 +18,8 @@ import {
   isVectorEnabled,
 } from "../../repositories/vectorStore.js";
 import { immediateTransaction } from "../../repositories/sqliteTx.js";
+import { pickBestNamedCandidate } from "./edgeResolverShared.js";
+import { buildImportedFilesByFile, normalizeFilePath, pythonImportedFilesForName } from "./moduleResolution.js";
 
 /**
  * Fan out a call on an `abstract`/`virtual` base member to the overrides in its subclasses
@@ -200,6 +202,7 @@ export function resolveExtendsEdges(db: Database.Database, repoId: string): numb
   for (const row of rows) {
     if (!baseByName.has(row.name)) baseByName.set(row.name, row.symbolId);
   }
+  const pythonBase = pythonBasePicker(db, repoId, baseNames);
 
   const updateStmt = db.prepare(
     `update or ignore edges set to_id = ?, confidence = ?, reason = ?
@@ -213,6 +216,12 @@ export function resolveExtendsEdges(db: Database.Database, repoId: string): numb
   let count = 0;
   const tx = immediateTransaction(db, () => {
     for (const row of unresolved) {
+      const py = pythonBase(row.fromId, row.toId.slice("base:".length));
+      if (py) {
+        updateStmt.run(py.symbolId, 0.95, py.kind === "interface" ? "base_list protocol" : "base_list class", repoId, row.fromId, row.toId);
+        count += 1;
+        continue;
+      }
       const match = baseByName.get(row.toId.slice("base:".length));
       if (match && match !== row.fromId) {
         // `update or ignore`: a partial class listing the same base twice, or two base-list entries
@@ -229,6 +238,65 @@ export function resolveExtendsEdges(db: Database.Database, repoId: string): numb
   tx();
 
   return count;
+}
+
+type PythonBaseCandidate = { symbolId: string; filePath: string; kind: string };
+
+/**
+ * MCP-ISSUE-128 leftover 8: the base a Python class's EXTENDS row names, picked the way the call lane's
+ * `buildPythonBases` picks it — Python classes AND Protocols (kind `interface`) of that name, same file, then
+ * the files the subclass imports, then the tie-break. Before, `class M(Executor)` with `Executor` a Protocol
+ * kept an external-boundary EXTENDS (only class kinds were looked up), and a Python base was bound to the
+ * first same-named class by path in any language. Returns undefined for a non-Python subclass and for a name
+ * no Python file declares, which fall through to the language-neutral lookup unchanged.
+ */
+function pythonBasePicker(
+  db: Database.Database,
+  repoId: string,
+  baseNames: string[]
+): (fromId: string, baseName: string) => PythonBaseCandidate | undefined {
+  const none = () => undefined;
+  const fromFiles = new Map<string, string>();
+  for (const r of db
+    .prepare(
+      `select distinct e.from_id as fromId, s.file_path as filePath
+       from edges e join symbols s on s.repo_id = e.repo_id and s.symbol_id = e.from_id
+       where e.repo_id = ? and e.type = 'EXTENDS' and e.to_id like 'base:%'
+         and (s.file_path like '%.py' or s.file_path like '%.pyi')`
+    )
+    .all(repoId) as { fromId: string; filePath: string }[]) {
+    fromFiles.set(r.fromId, r.filePath);
+  }
+  if (fromFiles.size === 0) return none;
+
+  const placeholders = baseNames.map(() => "?").join(",");
+  const byName = new Map<string, PythonBaseCandidate[]>();
+  for (const c of db
+    .prepare(
+      `select symbol_id as symbolId, name, file_path as filePath, kind from symbols
+       where repo_id = ? and kind in ('class', 'interface') and name in (${placeholders})
+         and (file_path like '%.py' or file_path like '%.pyi')
+       order by name, file_path, symbol_id`
+    )
+    .all(repoId, ...baseNames) as (PythonBaseCandidate & { name: string })[]) {
+    const list = byName.get(c.name);
+    if (list) list.push(c);
+    else byName.set(c.name, [c]);
+  }
+  if (byName.size === 0) return none;
+
+  const importedFilesByFile = buildImportedFilesByFile(db, repoId);
+  return (fromId, baseName) => {
+    const fromFile = fromFiles.get(fromId);
+    if (fromFile === undefined) return undefined;
+    const candidates = (byName.get(baseName) ?? []).filter((c) => c.symbolId !== fromId);
+    return pickBestNamedCandidate(
+      candidates,
+      fromFile,
+      ["class", "interface"],
+      pythonImportedFilesForName(importedFilesByFile, normalizeFilePath(fromFile), baseName)
+    );
+  };
 }
 
 export function resolveImplementsEdges(db: Database.Database, repoId: string): number {

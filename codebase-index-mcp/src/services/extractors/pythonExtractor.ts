@@ -536,11 +536,33 @@ function extractCalls(
     return hint;
   };
 
+  // `Outer.Inner(x)`: bound here, to the nested class's id, because the resolver reads `Outer.Inner` as a METHOD
+  // `Inner` of `Outer` (an external boundary), and a bare `Inner` token would bind the first same-file `Inner`.
+  let nested: Map<string, string> | undefined;
+  const pushNested = (fromId: string, classId: string): EdgeRecord => {
+    const key = `${fromId}\u0000=${classId}`;
+    const known = seen.get(key);
+    if (known) return known;
+    const edge: EdgeRecord = { repoId: input.repoId, fromId, toId: classId, type: "CALLS", confidence: 0.9, reason: "resolved callee by receiver type" };
+    seen.set(key, edge);
+    edges.push(edge);
+    return edge;
+  };
+
   for (const call of root.descendantsOfType("call")) {
     const fn = call.childForFieldName("function");
     if (!fn) continue;
     const fromId = enclosingSymbolId(call, input, registered) ?? moduleSymbolId;
-    const token = callToken(fn, call, scope, moduleFunctions, localClasses, types);
+    const nestedKey = nestedClassKey(fn, scope, localClasses);
+    const nestedId = nestedKey ? (nested ??= nestedClassIds(input, root, registered)).get(nestedKey) : undefined;
+    if (nestedId) {
+      const edge = pushNested(fromId, nestedId);
+      otherwise.add(edge);
+      // A constructor call, like `Foo(x)`: plain `#` argument slots.
+      const site = argumentTypes(call, types, false);
+      if (site && hintOf(edge).sites.length < MAX_HINT_SITES) hintOf(edge).sites.push(site);
+    }
+    const token = nestedId ? null : callToken(fn, call, scope, moduleFunctions, localClasses, types);
     if (token) {
       const edge = push(fromId, token);
       const site = argumentTypes(call, types, isClassCall(fn, call, scope, localClasses, types));
@@ -599,6 +621,61 @@ function extractCalls(
     if (otherwise.has(edge)) continue;
     edge.assignedExpression = edge.assignedExpression ? `${edge.assignedExpression} ${PYTHON_OBJECT_RECEIVER_MARK}` : PYTHON_OBJECT_RECEIVER_MARK;
   }
+}
+
+/**
+ * `Outer.Inner` for a call whose receiver is a class defined at module level in this file (not shadowed by an
+ * import, which `callToken` reads first) — the key `nestedClassIds` answers. Null for anything else.
+ */
+function nestedClassKey(fn: Parser.SyntaxNode, scope: ImportScope, localClasses: Set<string>): string | null {
+  if (fn.type !== "attribute") return null;
+  const receiver = fn.childForFieldName("object");
+  const member = fn.childForFieldName("attribute")?.text;
+  if (receiver?.type !== "identifier" || !member) return null;
+  const name = receiver.text;
+  if (scope.names.has(name) || scope.modules.has(name) || !localClasses.has(name)) return null;
+  return `${name}\u0000${member}`;
+}
+
+/**
+ * Every class defined directly in the body of a module-level class (through decorators and same-level
+ * if/try blocks), keyed `Outer\0Inner`, minted as `collectDefinitions` minted it. First in the file wins, as
+ * for a module-level name bound twice.
+ */
+function nestedClassIds(input: ExtractInput, root: Parser.SyntaxNode, registered: ReadonlySet<string>): Map<string, string> {
+  const out = new Map<string, string>();
+  for (const inner of root.descendantsOfType("class_definition")) {
+    const outer = ownerClassDef(inner);
+    if (!outer || !isModuleLevel(outer)) continue;
+    const outerName = outer.childForFieldName("name")?.text;
+    const innerName = inner.childForFieldName("name")?.text;
+    if (!outerName || !innerName) continue;
+    const key = `${outerName}\u0000${innerName}`;
+    if (out.has(key)) continue;
+    const id = makeSymbolId(input, classKindOf(inner), innerName, inner.startPosition.row);
+    if (registered.has(id)) out.set(key, id);
+  }
+  return out;
+}
+
+/** The class whose body holds `def` directly, or null when a def or the module comes first. */
+function ownerClassDef(def: Parser.SyntaxNode): Parser.SyntaxNode | null {
+  let current: Parser.SyntaxNode | null = def.parent;
+  while (current) {
+    if (current.type === "class_definition") return current;
+    if (current.type === "function_definition" || current.type === "module") return null;
+    current = current.parent;
+  }
+  return null;
+}
+
+function isModuleLevel(def: Parser.SyntaxNode): boolean {
+  let current: Parser.SyntaxNode | null = def.parent;
+  while (current) {
+    if (current.type === "class_definition" || current.type === "function_definition") return false;
+    current = current.parent;
+  }
+  return true;
 }
 
 /** Row #16: `obj.m()` whose receiver is not `self` / `cls` (those arrive qualified) and not an imported module. */

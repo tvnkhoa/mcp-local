@@ -62,6 +62,60 @@ test("release L: interface dispatch is rebuilt whole — idempotent, direct edge
   assert.ok(!calls(conn, "interface-dispatch").some((e) => e.endsWith(">C.Save")), "the stale C.Save edges are gone");
 });
 
+test("MCP-ISSUE-133: interface dispatch binds the implementer TYPE's method, not the first same-named method in its file", () => {
+  const conn = db();
+  sym(conn, "I", "IStore", "interface", "IStore.cs");
+  sym(conn, "I.Save", "Save", "method", "IStore.cs", "I", "Task Save(string key, int value);");
+  // One file: a helper type that sorts first and is NOT an implementer, two implementers, and a nested type.
+  sym(conn, "H", "Helper", "class", "Stores.cs");
+  sym(conn, "0.H.Save", "Save", "method", "Stores.cs", "H", "public void Save(string key, int value)");
+  sym(conn, "A", "StoreA", "class", "Stores.cs");
+  sym(conn, "A.Inner", "Inner", "class", "Stores.cs", "A");
+  sym(conn, "1.A.Inner.Save", "Save", "method", "Stores.cs", "A.Inner", "public void Save(string key, int value)");
+  sym(conn, "2.A.Save", "Save", "method", "Stores.cs", "A", "public Task Save(string key, int value)");
+  sym(conn, "B", "StoreB", "class", "Stores.cs");
+  sym(conn, "3.B.Save1", "Save", "method", "Stores.cs", "B", "public Task Save(string key)");
+  sym(conn, "4.B.Save2", "Save", "method", "Stores.cs", "B", "public Task Save(string key, int value)");
+  sym(conn, "caller", "Handle", "method", "H.cs");
+  edge(conn, "A", "I", "IMPLEMENTS", "resolved interface");
+  edge(conn, "B", "I", "IMPLEMENTS", "resolved interface");
+  edge(conn, "caller", "I.Save", "CALLS", "resolved interface method");
+
+  rebuildInterfaceDispatchEdges(conn, "r");
+  assert.deepEqual(
+    calls(conn, "interface-dispatch"),
+    ["caller>2.A.Save", "caller>4.B.Save2"],
+    "each implementer reaches its own Save, the overload with the interface's arity; Helper and the nested type are never reached"
+  );
+});
+
+test("MCP-ISSUE-133: a method row with no parent link still binds by file (an index written before parent_symbol_id)", () => {
+  const conn = db();
+  sym(conn, "I", "IStore", "interface", "IStore.cs");
+  sym(conn, "I.Save", "Save", "method", "IStore.cs", "I");
+  sym(conn, "A", "StoreA", "class", "StoreA.cs");
+  sym(conn, "A.Save", "Save", "method", "StoreA.cs", null);
+  sym(conn, "caller", "Handle", "method", "H.cs");
+  edge(conn, "A", "I", "IMPLEMENTS", "resolved interface");
+  edge(conn, "caller", "I.Save", "CALLS", "resolved interface method");
+  rebuildInterfaceDispatchEdges(conn, "r");
+  assert.deepEqual(calls(conn, "interface-dispatch"), ["caller>A.Save"]);
+});
+
+test("MCP-ISSUE-133: an implementer with no Save of its own is not given another type's Save from its file", () => {
+  const conn = db();
+  sym(conn, "I", "IStore", "interface", "IStore.cs");
+  sym(conn, "I.Save", "Save", "method", "IStore.cs", "I");
+  sym(conn, "A", "StoreA", "class", "Stores.cs");
+  sym(conn, "O", "Other", "class", "Stores.cs");
+  sym(conn, "O.Save", "Save", "method", "Stores.cs", "O");
+  sym(conn, "caller", "Handle", "method", "H.cs");
+  edge(conn, "A", "I", "IMPLEMENTS", "resolved interface");
+  edge(conn, "caller", "I.Save", "CALLS", "resolved interface method");
+  rebuildInterfaceDispatchEdges(conn, "r");
+  assert.deepEqual(calls(conn, "interface-dispatch"), []);
+});
+
 test("release L: base-class dispatch is rebuilt whole — a re-run never duplicates, a direct edge wins", () => {
   const conn = db();
   sym(conn, "Base", "ValueObject", "class", "ValueObject.cs");
