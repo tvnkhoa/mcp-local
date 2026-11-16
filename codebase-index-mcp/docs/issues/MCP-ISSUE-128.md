@@ -4,6 +4,8 @@
   619f598 PY-6, a4b260e PY-9, then the review fixes). Leftovers 1-5 fixed by row #12 (branch `wt/py-rest`: 089a0e4
   PY-8b, e87d81e PY-5b, e19e88d PY-5c, da05138 PY-6b, 890936e review); 6-8 remain. Row #12's open review items
   and the same-file bind discovery fixed by row #16 (branch `wt/py-calls`: 81df628, 9081440, 65c1239, 6e4631f).
+  Leftover 8 and row #16's `Outer.Inner(x)` discovery fixed by row #3 of 16 Nov (branch `wt/py-leftovers`, see
+  *Row #3 (16 Nov)* below); 6 and 7 remain, and so does `Outer.Inner(x)` for an IMPORTED `Outer`.
   Needs a FULL re-index of every Python repo after deploy (translate): Protocol classes change kind (and so symbol
   id), CALLS / IMPLEMENTS semantics changed, and rows #12 / #16 add module `__all__` signatures and CALLS hints; no
   `INDEX_VERSION` bump.
@@ -49,7 +51,7 @@ Items 1-5 are FIXED by row #12 — see *Row #12* below; their original text is k
    Protocol's `x: Sub`) is a mismatch; TypeVars (`T`, `TKey`, `T_co`) and `List`/`list` are handled.
 7. **A dotted name query answers on the parent link first.** A symbol literally named with dots (a C# namespace module
    `A.B.C`) is shadowed when some `C` has a parent named `B` (review, low).
-8. **Explicit Protocol subclass keeps an external EXTENDS.** `class M(Executor)` with `Executor` a Protocol: the EXTENDS
+8. **FIXED (row #3, 16 Nov).** **Explicit Protocol subclass keeps an external EXTENDS.** `class M(Executor)` with `Executor` a Protocol: the EXTENDS
    row is tagged external boundary (resolveExtendsEdges binds classes only); the IMPLEMENTS edge carries the relation.
 
 ### Row #12 (13 Nov 2026, branch `wt/py-rest`) — leftovers 1-5
@@ -120,9 +122,34 @@ the traversal tools hides a low-confidence CALLS row by default, so it inflates 
 - **Consequence, by design:** an `r.go(P())` whose own receiver nothing types is now an untyped anchor, and the
   review #1 rule keeps an anchor's `pyargs` out of the caller set, so it no longer types `go`'s parameters. Before,
   it did so standing on a same-file 0.9 that was itself a name guess.
-- **Discovery (not fixed):** a nested-class construction `Outer.Inner(x)` never resolves — the token `Outer.Inner`
+- **Discovery (FIXED for a same-file `Outer` by row #3, 16 Nov):** a nested-class construction `Outer.Inner(x)` never resolves — the token `Outer.Inner`
   ends an external boundary (the class-receiver branch looks for a METHOD named `Inner`), so `Inner.__init__` has
   no caller.
+
+### Row #3 (16 Nov 2026, branch `wt/py-leftovers`) — leftover 8, `Outer.Inner(x)`
+
+- **Leftover 8.** `resolveExtendsEdges` (`edgeResolverContracts.ts`) binds a Python subclass's `base:Name` the way
+  the call lane's `buildPythonBases` does: Python classes AND Protocols (kind `interface`) of that name, same
+  file, then the files the subclass imports, then the tie-break; reason `base_list protocol` for a Protocol base,
+  `base_list class` otherwise. A name no Python file declares, and every non-Python subclass, fall through to the
+  old language-neutral class lookup unchanged. `class M(Executor)` and a sub-Protocol's `Executor` base now
+  EXTEND the Protocol instead of an external boundary; `Protocol` itself stays a token.
+- **`Outer.Inner(x)`.** The extractor binds the call to the nested class's id (reason `resolved callee by
+  receiver type`, 0.9) when `Outer` is a module-level class of the same file, not shadowed by an import, and
+  `Inner` a class directly in its body; first `Outer.Inner` in the file wins. Its argument hint uses plain `#`
+  slots, like `Foo(x)`, so the caller types `Inner.__init__`'s parameters. A bare `Inner` token was not an
+  option: the same-file bind takes the first `Inner` in the file, whichever class holds it.
+- **Evidence:** test:python-gaps red 7 / green 98 (LoudSink imports `z_sinks.Sink` while `a_sinks.Sink` sorts
+  first; `Other.Inner(Lamp())` beside an earlier `Outer.Inner`). Scratch FULL index, HEAD 44e1e9a build vs
+  branch: ssnet (C#, 22 775 edges) and mcp-local's `.ts` / `.mjs` / `.json` edges sha256-identical; translate @98b1bd3
+  moves 2 EXTENDS rows, `LimitedProvider` / `OrderProvider` → the `FakeProvider` of their own file instead of
+  `test_engine.py`'s (correct); translate has no explicit Protocol subclass and no nested construction.
+- **Still open:** `Outer.Inner(x)` for an IMPORTED `Outer` keeps the external-boundary token — the call pass's
+  class-receiver branch (`edgeResolverCalls.ts`) looks for a METHOD `Inner`; the fix there is to fall back to a
+  class `Inner` whose parent is the bound `Outer`. Leftover 6 (design, same file): in the Protocol signature
+  check, an implementer parameter annotated `Base` fits a Protocol parameter annotated `Sub` when `Base` is in
+  `Sub`'s in-repo C3 MRO (contravariant parameters; returns the other way round), using the bases
+  `buildPythonBases` already builds. Leftover 7 lives in the search path, not the Python lane.
 
 ### Review fixes (independent review of the five commits)
 
