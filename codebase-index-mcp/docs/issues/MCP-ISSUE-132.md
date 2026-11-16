@@ -31,7 +31,7 @@
   - One path: `searchSymbolsImpl` no longer pads at all. The handler asks `needsVectorPadding` and appends the
     worker's rows (`appendVectorNeighbours`). Sync callers (`get_symbol_blame` / cross-repo name lookups) get name
     matches only; a near-neighbour was never their answer.
-  - A neighbour list that did not arrive is reported, never silent: `paddingSkipped: "budget" | "queue" | "error" |
+  - A neighbour list that did not arrive is reported, never silent: `paddingSkipped: "budget" | "queue" | "worker-error" |
     "unavailable"` plus a coverage gap. A late answer is still computed and memoized in the worker.
   - At most 4 outstanding searches (`queue` beyond). The worker exits after 5 min idle and on shutdown. Its KNN memo
     is cleared with the server thread's caches (`GraphStore.onProcessCachesInvalidated`: run landed, purge, seed).

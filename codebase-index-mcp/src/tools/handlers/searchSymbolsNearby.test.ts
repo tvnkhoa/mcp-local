@@ -89,7 +89,7 @@ test("ISSUE-132: neighbours from the worker land in `nearby`; the worker is aske
 });
 
 test("ISSUE-132: a missing worker answer is reported (paddingSkipped + a coverage gap), never silent", async () => {
-  for (const reason of ["budget", "queue", "error"] as const) {
+  for (const reason of ["budget", "queue", "worker-error"] as const) {
     const out = await padCall(paddingCtx(async () => ({ skipped: reason })));
     assert.equal(out.count, 1, reason);
     assert.equal(out.paddingSkipped, reason);

@@ -8,7 +8,8 @@
  * - **Budget.** A late answer is not waited for: the call resolves `{ skipped: "budget" }` and the response says the
  *   padding was skipped (never silently). The worker finishes the scan anyway and memoizes it, so the next identical
  *   query is answered at once.
- * - **Queue bound.** At most {@link MAX_PENDING} searches are outstanding; beyond that a call resolves
+ * - **Queue bound.** At most {@link MAX_PENDING} searches are outstanding — a budget-timed-out one counts until the
+ *   worker answers it, since it still occupies the worker — and beyond that a call resolves
  *   `{ skipped: "queue" }` at once instead of piling scans behind each other.
  * - **Lifetime.** Spawned lazily on the first padded query; terminated after {@link IDLE_EXIT_MS} without a request
  *   (the next query spawns a fresh one), and on server shutdown.
@@ -25,7 +26,7 @@ export const MAX_PENDING = 4;
 export const IDLE_EXIT_MS = 5 * 60_000;
 
 export type VectorRow = { symbolId: string; distance: number };
-export type VectorSearchOutcome = { rows: VectorRow[] } | { skipped: "budget" | "queue" | "error" };
+export type VectorSearchOutcome = { rows: VectorRow[] } | { skipped: "budget" | "queue" | "worker-error" };
 
 /** The part of `Worker` the client uses — a seam for unit tests. */
 export interface VectorWorkerLike {
@@ -57,7 +58,10 @@ export class VectorSearchWorkerClient {
     private readonly opts: { spawn?: SpawnVectorWorker; idleExitMs?: number } = {}
   ) {}
 
-  /** Outstanding searches (answered late ones excluded). */
+  /**
+   * Outstanding searches, INCLUDING ones whose caller already got `budget`: a late request is still queued or running
+   * in the (serial) worker, so counting it is what keeps MAX_PENDING a bound on the scans piled up there.
+   */
   get pendingCount(): number {
     return this.pending.size;
   }
@@ -67,7 +71,7 @@ export class VectorSearchWorkerClient {
   }
 
   search(repoId: string, text: string, k: number, waitMs = DEFAULT_PADDING_WAIT_MS): Promise<VectorSearchOutcome> {
-    if (this.disposed) return Promise.resolve({ skipped: "error" });
+    if (this.disposed) return Promise.resolve({ skipped: "worker-error" });
     if (this.pending.size >= MAX_PENDING) return Promise.resolve({ skipped: "queue" });
     const worker = this.ensureWorker();
     const id = this.nextId++;
@@ -79,6 +83,7 @@ export class VectorSearchWorkerClient {
         entry.settle({ skipped: "budget" });
         entry.settle = () => {};
       }, waitMs);
+      entry.timer.unref();
       this.pending.set(id, entry);
       worker.postMessage({ kind: "search", id, dbPath: this.dbPath, repoId, text, k });
     });
@@ -115,7 +120,7 @@ export class VectorSearchWorkerClient {
     if (!p) return;
     this.pending.delete(m.id);
     if (p.timer) clearTimeout(p.timer);
-    p.settle(m.kind === "result" ? { rows: m.rows } : { skipped: "error" });
+    p.settle(m.kind === "result" ? { rows: m.rows } : { skipped: "worker-error" });
     if (this.pending.size === 0) this.armIdle();
   }
 
@@ -129,7 +134,7 @@ export class VectorSearchWorkerClient {
   private failAll(): void {
     for (const p of this.pending.values()) {
       if (p.timer) clearTimeout(p.timer);
-      p.settle({ skipped: "error" });
+      p.settle({ skipped: "worker-error" });
     }
     this.pending.clear();
   }

@@ -27,24 +27,58 @@ export type VectorSearchMessage =
   | { kind: "result"; id: number; rows: { symbolId: string; distance: number }[]; ms: number }
   | { kind: "error"; id: number; message: string };
 
-let db: Database.Database | null = null;
-let openPath = "";
-
-function connection(dbPath: string): Database.Database {
-  if (db && openPath === dbPath) return db;
-  db?.close();
-  db = new Database(dbPath, { readonly: true, fileMustExist: true });
-  db.pragma("busy_timeout = 5000");
-  db.pragma("mmap_size = 268435456");
-  openPath = dbPath;
-  initVectorStore(db, createRequire(import.meta.url));
-  return db;
+/**
+ * The worker's request handling, with its two side effects injectable for tests. A connection whose sqlite-vec failed
+ * to load is an ERROR for every search (review, 16 Nov): vectorStore.ts would fall back to its in-memory map, which is
+ * empty in this thread, and answer `rows: []` as a success — the padding would vanish without a word.
+ */
+export function createSearchHandler(deps: {
+  open: (dbPath: string) => Database.Database;
+  loadVec: (db: Database.Database) => boolean;
+}): { answer: (req: Extract<VectorSearchRequest, { kind: "search" }>) => VectorSearchMessage; close: () => void } {
+  let db: Database.Database | null = null;
+  let openPath = "";
+  let vecLoaded = false;
+  const connection = (dbPath: string): Database.Database => {
+    if (db && openPath === dbPath) return db;
+    db?.close();
+    db = deps.open(dbPath);
+    openPath = dbPath;
+    vecLoaded = deps.loadVec(db);
+    return db;
+  };
+  return {
+    answer: (req) => {
+      const t0 = performance.now();
+      try {
+        const conn = connection(req.dbPath);
+        if (!vecLoaded) return { kind: "error", id: req.id, message: "sqlite-vec did not load in the vector-search worker" };
+        const rows = vectorSearchSymbols(conn, req.repoId, req.text, req.k);
+        return { kind: "result", id: req.id, rows, ms: Math.round(performance.now() - t0) };
+      } catch (e) {
+        return { kind: "error", id: req.id, message: e instanceof Error ? e.message : String(e) };
+      }
+    },
+    close: () => {
+      db?.close();
+      db = null;
+    }
+  };
 }
+
+const handler = createSearchHandler({
+  open: (dbPath) => {
+    const conn = new Database(dbPath, { readonly: true, fileMustExist: true });
+    conn.pragma("busy_timeout = 5000");
+    conn.pragma("mmap_size = 268435456");
+    return conn;
+  },
+  loadVec: (conn) => initVectorStore(conn, createRequire(import.meta.url))
+});
 
 parentPort?.on("message", (req: VectorSearchRequest) => {
   if (req.kind === "exit") {
-    db?.close();
-    db = null;
+    handler.close();
     process.exit(0);
   }
   if (req.kind === "invalidate") {
@@ -53,13 +87,5 @@ parentPort?.on("message", (req: VectorSearchRequest) => {
     invalidateVectorSearchCache();
     return;
   }
-  const t0 = performance.now();
-  try {
-    const rows = vectorSearchSymbols(connection(req.dbPath), req.repoId, req.text, req.k);
-    const msg: VectorSearchMessage = { kind: "result", id: req.id, rows, ms: Math.round(performance.now() - t0) };
-    parentPort?.postMessage(msg);
-  } catch (e) {
-    const msg: VectorSearchMessage = { kind: "error", id: req.id, message: e instanceof Error ? e.message : String(e) };
-    parentPort?.postMessage(msg);
-  }
+  parentPort?.postMessage(handler.answer(req));
 });

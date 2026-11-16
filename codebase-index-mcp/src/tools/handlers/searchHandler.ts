@@ -180,7 +180,7 @@ export async function handleSearchSymbols(
 const PADDING_SKIP_REASON = {
   budget: "the vector search did not answer within its wait budget (it finishes in the background and is memoized)",
   queue: "too many vector searches were already outstanding",
-  error: "the vector-search worker failed",
+  "worker-error": "the vector-search worker failed (it crashed, or sqlite-vec did not load in it)",
   unavailable: "no vector-search worker in this context"
 } as const;
 

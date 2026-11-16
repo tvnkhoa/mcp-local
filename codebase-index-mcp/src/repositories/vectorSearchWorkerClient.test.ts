@@ -5,10 +5,15 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { Worker } from "node:worker_threads";
+import { createRequire } from "node:module";
 import test from "node:test";
 
+import Database from "better-sqlite3";
+
+import { GraphStore } from "./graphStore.js";
 import { MAX_PENDING, VectorSearchWorkerClient, type VectorWorkerLike } from "./vectorSearchWorkerClient.js";
-import type { VectorSearchMessage, VectorSearchRequest } from "./vectorSearchWorker.js";
+import { createSearchHandler, type VectorSearchMessage, type VectorSearchRequest } from "./vectorSearchWorker.js";
+import { batchUpsertSymbolVectors, initVectorStore } from "./vectorStore.js";
 
 type SearchReq = Extract<VectorSearchRequest, { kind: "search" }>;
 type Answer = (req: SearchReq, reply: (m: VectorSearchMessage) => void, self: FakeWorker) => void;
@@ -61,7 +66,12 @@ test("a late answer resolves `budget` at the budget, without waiting for the wor
     release = () => reply({ kind: "result", id: req.id, rows: [], ms: 1 });
   });
   const t0 = performance.now();
-  assert.deepEqual(await c.search("r", "slow", 5, 50), { skipped: "budget" });
+  // The budget timer is unref'd (it must never keep a server alive on its own); the server's transport keeps its loop
+  // alive, here nothing would, so hold the loop open while waiting.
+  const keepAlive = setInterval(() => {}, 1_000);
+  const late = await c.search("r", "slow", 5, 50);
+  clearInterval(keepAlive);
+  assert.deepEqual(late, { skipped: "budget" });
   assert.ok(performance.now() - t0 < 1_000);
   assert.equal(c.pendingCount, 1, "the late request still counts until the worker answers it");
   (release as unknown as () => void)();
@@ -76,7 +86,7 @@ test("MAX_PENDING outstanding searches: the next one is refused at once (`queue`
   const waits = Array.from({ length: MAX_PENDING }, (_, i) => c.search("r", `q${String(i)}`, 5, 10_000));
   assert.deepEqual(await c.search("r", "one-too-many", 5, 10_000), { skipped: "queue" });
   await c.dispose();
-  for (const w of waits) assert.deepEqual(await w, { skipped: "error" }, "dispose settles every waiter");
+  for (const w of waits) assert.deepEqual(await w, { skipped: "worker-error" }, "dispose settles every waiter");
 });
 
 test("a worker error or exit settles its waiters with `error`; the next search spawns a fresh worker", async () => {
@@ -85,8 +95,8 @@ test("a worker error or exit settles its waiters with `error`; the next search s
     else if (req.text === "die") setImmediate(() => void self.terminate());
     else setImmediate(() => reply({ kind: "result", id: req.id, rows: [], ms: 1 }));
   });
-  assert.deepEqual(await c.search("r", "boom", 5, 1_000), { skipped: "error" });
-  assert.deepEqual(await c.search("r", "die", 5, 1_000), { skipped: "error" });
+  assert.deepEqual(await c.search("r", "boom", 5, 1_000), { skipped: "worker-error" });
+  assert.deepEqual(await c.search("r", "die", 5, 1_000), { skipped: "worker-error" });
   assert.deepEqual(await c.search("r", "ok", 5, 1_000), { rows: [] });
   assert.equal(spawned.length, 2);
   await c.dispose();
@@ -135,6 +145,46 @@ test("bundle: dist/bundle/vectorSearchWorker.js loads, opens a DB read-only and 
     } finally {
       await c.dispose();
     }
+  } finally {
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// Review (16 Nov): a worker whose sqlite-vec failed to load must not answer `rows: []` as a success (vectorStore's
+// in-memory fallback is empty in that thread) — the padding would vanish without a word.
+test("sqlite-vec load failure in the worker: every search is an error, reported as paddingSkipped worker-error", async (t) => {
+  const dir = mkdtempSync(path.join(tmpdir(), "vsw-novec-"));
+  const dbPath = path.join(dir, "index.db");
+  const store = new GraphStore(dbPath);
+  try {
+    if (!store.isVectorEnabled) {
+      t.skip("sqlite-vec not loadable here (or CODEBASE_INDEX_VECTOR_ENABLED=false)");
+      return;
+    }
+    batchUpsertSymbolVectors((store as unknown as { db: Database.Database }).db, "r", [{ symbolId: "a", name: "sendNotificationEmail" }]);
+    const open = (p: string): Database.Database => new Database(p, { readonly: true, fileMustExist: true });
+    const req = (id: number): SearchReq => ({ kind: "search", id, dbPath, repoId: "r", text: "sendNotificatonEmail", k: 1 });
+
+    const failing = createSearchHandler({ open, loadVec: () => false });
+    const failed = failing.answer(req(1));
+    assert.equal(failed.kind, "error");
+    assert.match(failed.kind === "error" ? failed.message : "", /sqlite-vec did not load/);
+    assert.equal(failing.answer(req(2)).kind, "error", "and stays an error on the same connection");
+    failing.close();
+
+    // Control: the same handler with the real load answers the row.
+    const working = createSearchHandler({ open, loadVec: (db) => initVectorStore(db, createRequire(import.meta.url)) });
+    const ok = working.answer(req(3));
+    assert.deepEqual(ok.kind === "result" ? ok.rows.map((r) => r.symbolId) : ok, ["a"]);
+    working.close();
+
+    // Through the client: the error reaches the caller as `worker-error`, not as an empty neighbour list.
+    const replyWith = createSearchHandler({ open, loadVec: () => false });
+    const { c } = client((r, reply) => setImmediate(() => reply(replyWith.answer(r))));
+    assert.deepEqual(await c.search("r", "sendNotificatonEmail", 1, 5_000), { skipped: "worker-error" });
+    await c.dispose();
+    replyWith.close();
   } finally {
     store.close();
     rmSync(dir, { recursive: true, force: true });
