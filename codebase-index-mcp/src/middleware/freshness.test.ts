@@ -1471,25 +1471,28 @@ test("MCP-ISSUE-131 (c): remove_repository's state sweep removes that repo's ter
 });
 
 test("MCP-ISSUE-122: a caller joining an overdue run reports its own wait (waitedMs) beside the run's age (elapsedMs)", async () => {
-  const h = harness({ budgetMs: 20 });
+  // A wide budget so that a loaded machine's delay (threadpool hops, GC) is small against the gap the test asserts
+  // between "waited out the budget" (>= ~BUDGET) and "joined an overdue run" (~0).
+  const BUDGET = 200;
+  const h = harness({ budgetMs: BUDGET });
   try {
     h.setTree({ head: "ddd444", dirty: [] });
     h.setIndexed(null); // IX-B: only a repo with no previous index waits the budget for a run
     const first = await h.gate.ensureFresh("r");
     assert.equal(first.state, "refreshing");
     assert.ok(first.waitedMs !== undefined && first.elapsedMs !== undefined, "both figures are set when elapsedMs is");
-    assert.ok(first.waitedMs >= 15, `the first caller waited out the budget (${String(first.waitedMs)} ms)`);
+    assert.ok(first.waitedMs >= BUDGET - 15, `the first caller waited out the budget (${String(first.waitedMs)} ms)`);
 
     await new Promise((r) => setTimeout(r, 60));
     const second = await h.gate.ensureFresh("r");
     assert.equal(second.state, "refreshing");
-    assert.ok((second.elapsedMs ?? 0) >= 60, `elapsedMs is the run's age (${String(second.elapsedMs)} ms)`);
-    assert.ok((second.waitedMs ?? 99) < 15, `waitedMs is this call's wait, ~0 when joining an overdue run (${String(second.waitedMs)} ms)`);
+    assert.ok((second.elapsedMs ?? 0) >= BUDGET + 60 - 15, `elapsedMs is the run's age (${String(second.elapsedMs)} ms)`);
+    assert.ok((second.waitedMs ?? BUDGET) < BUDGET - 15, `waitedMs is this call's wait, ~0 when joining an overdue run (${String(second.waitedMs)} ms)`);
     assert.deepEqual(Object.keys(second).slice(0, 4), ["state", "mode", "elapsedMs", "waitedMs"], "waitedMs sits beside elapsedMs");
 
     h.finishRun();
-    await new Promise((r) => setTimeout(r, 5));
-    const fresh = await h.gate.ensureFresh("r");
+    // The finished run serves "the next query": ask until it settles (MCP-ISSUE-134 async state reads), not after a fixed sleep.
+    const fresh = await settled(() => h.gate.ensureFresh("r"), (n) => n.state === "fresh");
     assert.deepEqual(fresh, { state: "fresh" }, "no wait figure on a note that has no elapsedMs");
   } finally { h.cleanup(); }
 });

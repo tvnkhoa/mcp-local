@@ -458,14 +458,15 @@ test("mixed versions: an older client (the code before H-6b) never runs beside a
         try {
           const lock = await acquireHeavyLock({ cmd: "old client", timeoutMs: ${String(timeoutMs)}, pollMs: 25, log: () => {} });
           console.log("held " + process.pid);
-          await new Promise((r) => setTimeout(r, ${String(holdMs)}));
+          // holdMs "stdin": hold until the test closes stdin, so a loaded machine cannot outlast the hold.
+          await new Promise((r) => (${JSON.stringify(holdMs)} === "stdin" ? (process.stdin.resume(), process.stdin.once("end", r)) : setTimeout(r, ${JSON.stringify(holdMs)})));
           lock.release();
           console.log("released");
         } catch (error) {
           console.log(error.code);
         }
       `;
-      const child = spawn(process.execPath, ["--input-type=module", "-e", script], { env: envFor(lockPath, 100_000), stdio: ["ignore", "pipe", "inherit"] });
+      const child = spawn(process.execPath, ["--input-type=module", "-e", script], { env: envFor(lockPath, 100_000), stdio: ["pipe", "pipe", "inherit"] });
       let out = "";
       const lines = [];
       child.stdout.on("data", (c) => {
@@ -482,13 +483,16 @@ test("mixed versions: an older client (the code before H-6b) never runs beside a
   big.release();
 
   // 2. The older client holds: a new exclusive waits, and so does a new shared run (it counts as exclusive).
-  const holding = await oldClient(5_000, 1_500);
+  // It holds until this test closes its stdin (not a wall-clock hold): the two 300 ms waits below must both
+  // happen while it still holds, however slow the machine is.
+  const holding = await oldClient(60_000, "stdin");
   t.after(() => holding.child.exitCode === null && holding.child.kill());
   await until(() => holding.lines.some((l) => l.startsWith("held")));
   const lines = [];
   await timesOut(take(lockPath, 100_000, { cost: "large", timeoutMs: 300, log: (l) => lines.push(l) }));
   assert.match(lines.join("\n"), /held by an exclusive run or a caller of an older version/);
   await timesOut(take(lockPath, 100_000, { ramMb: 100, timeoutMs: 300 }));
+  holding.child.stdin.end();
   await holding.exited;
   const after = await take(lockPath, 100_000, { cost: "large", timeoutMs: 3_000 });
   assert.equal(after.acquired, true, "free again once the older client released");
