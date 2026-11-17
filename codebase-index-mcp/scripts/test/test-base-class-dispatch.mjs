@@ -81,6 +81,62 @@ public class UnrelatedThing
 `
 );
 
+// --- MCP-ISSUE-137: overrides bound by owner TYPE, not by the subclass's file ------------------------
+// `RepoBase.Save` calls its own virtual `AddAsync`. `Shared.cs` holds a RepoBase subclass with no override
+// beside `AudienceRepo`, which overrides a same-named member of an UNRELATED base; `Pair.cs` holds two
+// RepoBase subclasses that both override it. Keyed by file, the fan-out took the first `AddAsync` in each
+// file: AudienceRepo's method reached through NoOverrideRepo, and one of the pair missed.
+const repoBase = indexFile(
+  "src/RepoBase.cs",
+  `
+public abstract class RepoBase
+{
+    public virtual void AddAsync(int x) { }
+    public void Save(int x) { AddAsync(x); }
+}
+public abstract class OtherBase
+{
+    public virtual void AddAsync(int x) { }
+}
+`
+);
+const shared = indexFile(
+  "src/Shared.cs",
+  `
+public class AudienceRepo : OtherBase
+{
+    public override void AddAsync(int x) { }
+}
+public class NoOverrideRepo : RepoBase
+{
+}
+`
+);
+const pair = indexFile(
+  "src/Pair.cs",
+  `
+public class FirstRepo : RepoBase
+{
+    public override void AddAsync(int x) { }
+}
+public class SecondRepo : RepoBase
+{
+    public override void AddAsync(int x) { }
+}
+`
+);
+// A partial subclass: the base list in one part, the override in the other part's file.
+indexFile("src/PartialRepo.cs", `public partial class PartialRepo : RepoBase { }`);
+const partialOverride = indexFile(
+  "src/PartialRepo.Add.cs",
+  `
+public partial class PartialRepo
+{
+    public override void AddAsync(int x) { }
+}
+`
+);
+
 store.rebuildFts();
 store.resolveImplementsEdges(repoId);
 store.resolveExtendsEdges(repoId);
@@ -153,6 +209,31 @@ check(
   "the base's abstract declaration still holds its own direct call",
   abstractDecl !== undefined && callersOf(abstractDecl.symbolId).length > 0,
   abstractDecl ? `callers: ${callersOf(abstractDecl.symbolId).length}` : "symbol missing"
+);
+
+// --- MCP-ISSUE-137 --------------------------------------------------------------------------------
+const saveCaller = method(repoBase, "Save");
+const ownedBy = (extracted, ownerName, name) => {
+  const owner = extracted.symbols.find((s) => s.kind === "class" && s.name === ownerName);
+  return extracted.symbols.find((s) => s.kind === "method" && s.name === name && s.parentSymbolId === owner?.symbolId);
+};
+const dispatchedFromSave = (sym) =>
+  sym !== undefined && callersOf(sym.symbolId).some((e) => e.reason === "base-class-dispatch" && e.fromId === saveCaller?.symbolId);
+for (const owner of ["FirstRepo", "SecondRepo"]) {
+  const o = ownedBy(pair, owner, "AddAsync");
+  check(`MCP-ISSUE-137: ${owner}.AddAsync, one of two overrides in one file, is reached`, dispatchedFromSave(o), o ? JSON.stringify(callersOf(o.symbolId)) : "symbol missing");
+}
+const audience = ownedBy(shared, "AudienceRepo", "AddAsync");
+check(
+  "MCP-ISSUE-137: AudienceRepo.AddAsync (another base's override, same file as RepoBase subclasses) is NOT reached",
+  audience !== undefined && !dispatchedFromSave(audience),
+  audience ? JSON.stringify(callersOf(audience.symbolId)) : "symbol missing"
+);
+const partialAdd = method(partialOverride, "AddAsync");
+check(
+  "MCP-ISSUE-137: a partial subclass's override in its other part's file is reached",
+  dispatchedFromSave(partialAdd),
+  partialAdd ? JSON.stringify(callersOf(partialAdd.symbolId)) : "symbol missing"
 );
 
 console.log(log.join("\n"));
