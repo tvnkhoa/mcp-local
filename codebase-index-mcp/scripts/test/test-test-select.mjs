@@ -103,7 +103,7 @@ const inert = real(["scripts/serve-http.mjs", ".github/workflows/ci.yml"]);
 assert.equal(inert.whole, false);
 assert.deepEqual(inert.skipped, [{ file: "scripts/serve-http.mjs", reason: "@none" }, { file: ".github/workflows/ci.yml", reason: "@none" }]);
 assert.deepEqual(inert.selected.map((s) => s.name), ["test:unit", "guard:no-llm-runtime"]);
-assert.equal(real(["scripts/serve-http.mjs", "scripts/run-servers.mjs"]).whole, true, "an unlisted root script beside a none file still selects the whole suite");
+assert.equal(real(["scripts/serve-http.mjs", "scripts/new-server.mjs"]).whole, true, "an unlisted root script beside a none file still selects the whole suite");
 const broad = checkMap({ map: { none: ["scripts/**", "scripts/*.mjs", "packages/sdk/**", ".github/**"], harnesses: {} }, suite: [], exists: () => true });
 assert.deepEqual(
   broad.map((p) => p.split(":")[0]),
