@@ -533,6 +533,138 @@ function runBaseClassAfterInheritedDispatch() {
   console.log("[ok] row #10: base-class fan-out after an inherited dispatch stays in the dispatching implementer's subtree");
 }
 
+// ── 8. MCP-ISSUE-133 (row 5): a call on a method the receiver's interface only INHERITS from a base interface ──
+
+// ITenantRepository declares no AddAsync; it inherits one from the generic IPureRepository<T>. Its file also
+// declares IAuditLog with an AddAsync of its own (the file match bound that one), and ICampaignRepository in a
+// file that sorts first holds a third, unrelated AddAsync (what a name-only guess lands on).
+const inheritIfaceBase = `
+namespace App.Abstractions;
+
+public interface IPureRepository<T> where T : class
+{
+    Task AddAsync(T entity);
+}
+`;
+const inheritIfaceDerived = `
+namespace App.Abstractions;
+
+public interface IAuditLog
+{
+    Task AddAsync(string message);
+}
+
+public interface ITenantRepository : IPureRepository<Tenant>
+{
+    Task<Tenant> FindAsync(int id);
+}
+
+public interface IScopedTenantRepository<TScope> : ITenantRepository where TScope : class
+{
+}
+`;
+const inheritIfaceDecoy = `
+namespace App.Abstractions;
+
+public interface ICampaignRepository
+{
+    Task AddAsync(Campaign campaign);
+}
+`;
+const inheritIfaceImpls = `
+namespace App.Infrastructure;
+
+public class PureRepository<T> : IPureRepository<T> where T : class
+{
+    public virtual Task AddAsync(T entity) => Task.CompletedTask;
+}
+
+public class TenantRepository : PureRepository<Tenant>, ITenantRepository
+{
+    public Task<Tenant> FindAsync(int id) => null;
+}
+
+public class CampaignRepository : ICampaignRepository
+{
+    public Task AddAsync(Campaign campaign) => Task.CompletedTask;
+}
+
+// Implements the derived IScopedTenantRepository<T>; inherits AddAsync two classes up.
+public class ScopedTenantRepository<TScope> : TenantRepository, IScopedTenantRepository<TScope> where TScope : class { }
+
+public class AuditLog : IAuditLog
+{
+    public Task AddAsync(string message) => Task.CompletedTask;
+}
+`;
+// Another subclass of the base, no ITenantRepository implementer, with its own override: a call on
+// ITenantRepository never runs it, so the base-class fan-out must not reach it (the wec.social-ads
+// MetaAudienceRepository shape). Its own file: `resolveBaseClassDispatch` finds overrides by subclass FILE, a
+// separate defect this section does not test.
+const inheritIfaceAudience = `
+namespace App.Infrastructure;
+
+public sealed class AudienceRepository : PureRepository<Audience>
+{
+    public override Task AddAsync(Audience audience) => Task.CompletedTask;
+}
+`;
+const inheritIfaceCaller = `
+namespace App.Handlers;
+
+public class CreateTenantHandler(ITenantRepository tenants, IScopedTenantRepository<Org> scoped)
+{
+    public async Task Handle(Tenant t) { await tenants.AddAsync(t); }
+    public async Task HandleScoped(Tenant t) { await scoped.AddAsync(t); }
+}
+`;
+
+function runInheritedInterfaceMethod() {
+  const dbPath = createTempDbPath("ifd-inh-iface");
+  const store = new GraphStore(dbPath);
+  const repoId = "ifd-inh-iface";
+  store.ensureRepository(repoId, path.dirname(dbPath));
+
+  const files = [
+    indexFile(store, repoId, "src/Abstractions/IPureRepository.cs", inheritIfaceBase),
+    indexFile(store, repoId, "src/Abstractions/ITenantRepository.cs", inheritIfaceDerived),
+    indexFile(store, repoId, "src/Abstractions/ACampaignRepository.cs", inheritIfaceDecoy),
+    indexFile(store, repoId, "src/Infrastructure/Repositories.cs", inheritIfaceImpls),
+    indexFile(store, repoId, "src/Infrastructure/AudienceRepository.cs", inheritIfaceAudience)
+  ];
+  const caller = indexFile(store, repoId, "src/Handlers/CreateTenantHandler.cs", inheritIfaceCaller);
+  store.resolveImplementsEdges(repoId);
+  store.resolveExtendsEdges(repoId);
+  const ctx = store.buildCallResolutionContext(repoId);
+  while (store.resolveCallEdgesBatch(repoId, ctx, 5000) > 0) { /* drain */ }
+  store.rebuildInterfaceDispatchEdges(repoId);
+  store.resolveBaseClassDispatch(repoId);
+
+  const byId = new Map(files.flatMap((f) => f.symbols).map((s) => [s.symbolId, s]));
+  const label = (id) => {
+    const s = byId.get(id);
+    return s ? `${byId.get(s.parentSymbolId)?.name ?? "(none)"}.${s.name}` : id;
+  };
+  for (const name of ["Handle", "HandleScoped"]) {
+    const method = caller.symbols.find((s) => s.kind === "method" && s.name === name);
+    const out = store.getCallEdges(repoId, method.symbolId, "callees", 50).filter((e) => byId.has(e.toId));
+    const direct = out.filter((e) => e.reason !== "interface-dispatch" && e.reason !== "base-class-dispatch").map((e) => `${label(e.toId)}|${e.reason}`).sort();
+    const dispatch = [...new Set(out.filter((e) => e.reason === "interface-dispatch").map((e) => label(e.toId)))].sort();
+    assert.deepEqual(
+      direct,
+      ["IPureRepository.AddAsync|resolved interface method"],
+      `${name}: the call binds the AddAsync ITenantRepository inherits, never IAuditLog's or ICampaignRepository's (got ${JSON.stringify(direct)})`
+    );
+    assert.deepEqual(dispatch, ["PureRepository.AddAsync"], `${name}: dispatch reaches the inherited implementation only (got ${JSON.stringify(dispatch)})`);
+    const fanOut = out.filter((e) => e.reason === "base-class-dispatch").map((e) => label(e.toId));
+    assert.deepEqual(fanOut, [], `${name}: no fan-out into AudienceRepository's override — the receiver is a TenantRepository (got ${JSON.stringify(fanOut)})`);
+  }
+
+  store.close();
+  fs.rmSync(path.dirname(dbPath), { recursive: true });
+  console.log("[ok] MCP-ISSUE-133 (row 5): a call on an inherited-only interface method binds the base interface's declaration");
+}
+
 try {
   runExtraction();
   runResolutionAndQuery();
@@ -540,6 +672,7 @@ try {
   runIssue133();
   runInheritedBaseMethod();
   runBaseClassAfterInheritedDispatch();
+  runInheritedInterfaceMethod();
   console.log("[ok] test-interface-dispatch passed");
 } catch (err) {
   console.error("test-interface-dispatch: FAILED:", err.message);

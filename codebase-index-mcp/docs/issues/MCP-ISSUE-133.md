@@ -1,6 +1,7 @@
 ## MCP-ISSUE-133 — interface dispatch bound a call to the first same-named method in the implementer's FILE, not the implementer type's own method
 
-- **Status:** FIXED 2026-11-16 (row #2, branch `wt/cs-dispatch`). Found 13 Nov (not filed); number reserved by the leader.
+- **Status:** FIXED 2026-11-16 (row #2, branch `wt/cs-dispatch`); row #10 2026-11-16; row 5 2026-11-17 (branch
+  `wt/inherit-dispatch`, below). Found 13 Nov (not filed); number reserved by the leader.
 - **Scenario:** a C# call through an interface (`_store.Save(...)` with `_store: IStore`) resolves to the interface method;
   `rebuildInterfaceDispatchEdges` then fans it out to each implementation with `interface-dispatch` CALLS edges (0.7).
 - **Tool/query attempted:** `find_impact_files` / `get_call_chain` / `trace_execution_flow` on an implementation reached only
@@ -103,3 +104,64 @@
     overriding non-implementer, and an overriding subclass of the implementer).
   - Section 6 fails at ad5ddd0; section 7 and the fan-out unit case fail at 00eaf6f. All pass with the fix.
   - `runPolicy.test.ts` covers the v18 generation and the escalation from v17.
+
+### Row 5 — a call on a method the receiver's interface only INHERITS (FIXED 2026-11-17, branch `wt/inherit-dispatch`)
+
+- **Scenario:** `interface ITenantRepository : IPureRepository<Tenant>`, where only `IPureRepository<T>` declares
+  `AddAsync`. `tenants.AddAsync(t)` with `tenants: ITenantRepository` reached `resolveCallEdgesBatch` as
+  `callee:ITenantRepository.AddAsync`. Found by row #10 (wec.social-ads, `ITenantRepository.AddAsync`).
+- **Actual, cause 1:** the interface's own member was looked up by owner, then by the interface's FILE with any owner.
+  `ITenantRepository` declares no `AddAsync`, so the file match bound a same-named member of ANOTHER interface in that
+  file (`IAuditLog.AddAsync` in the harness), labelled proven (0.8). With no match in the file, nothing walked the base
+  interfaces: the qualified token fell through to the name-only lane.
+- **Cause 2:** the bare `callee:AddAsync` half of the same call site (the C# extractor emits both) bound by name to
+  whichever interface method sorted first (`ICampaignYoutubeRepository.AddAsync`) as `resolved interface method
+  (unproven receiver)`. MCP-ISSUE-052's suppression did not overrule it: it only overruled the two `resolved callee by
+  name` labels, so the guess and its `interface-dispatch` fan-out stayed even when the qualified half was proven.
+- **Fix:**
+  - `interfaceBaseNames` (`interfaceSiblings.ts`): an interface's base list read from its stored signature (C# `:`
+    list up to a `where` clause, TS `extends` list up to `{`; generic arguments and namespace qualifiers dropped).
+    The C# extractor emits no edge for an interface's base list, so the signature is the only record of it.
+  - `buildInterfaceBases` (`edgeResolverCalls.ts`) binds each base name like any call-lane name (same file, imported
+    file, tie-break) into `CallResolutionContext.interfaceBasesById`.
+  - `pickInterfaceMethod`: the receiver's own member by owner, else breadth-first up its base interfaces (nearest
+    declaration wins; base-list order between equals; 64-interface cap, cycles stop). Every step binds by owner as
+    `pickOwnedMethod` does; the file match is only for rows with no owner link. C#/TS only; Python is unchanged.
+  - `SUPPRESSIBLE_BARE_REASONS` adds `resolved interface method (unproven receiver)`: a bare guess that landed on an
+    interface yields to its proven qualified sibling, as a bare name guess already did.
+  - **Receiver-scoped fan-out.** The bound edge targets the BASE's method (`IPureRepository.AddAsync`), so the
+    dispatch fan-out took every implementer of the base and, through row #10b, the base-class fan-out went into
+    `MetaAudienceRepository`'s overrides for calls made on `ITenantRepository` (27 edges on wec.social-ads in a first
+    cut). The resolved row now carries `assigned_expression = 'iface-via:<receiver interface id>'`
+    (`IFACE_VIA_MARK`; `unifyInterfaceVia` gives every interface-bind row of one caller and target the same value, so
+    `deduplicateResolvedEdges`, which groups by that column, still collapses them). `planTypedDispatch` fans out from
+    the receiver's implementers and those of interfaces deriving from it. A proven call through the declaring
+    interface itself clears the marker and keeps the whole set. The column's other readers do not see it:
+    `getFieldAccesses` reads PROPERTY_* rows only and the Python lanes match `pyrecv:` / `pyargs:` / `pyset`.
+- **Limitation:** a base list wrapped onto a later line, or an interface whose declaration starts with an attribute
+  line (`[ServiceContract]`), has no base names in its signature, so the walk stops there (a missed bind, never a
+  wrong one). Counted: wec.social-ads 0 and wec.communication-hub 0 of either shape; wec.be 3 attribute-prefixed
+  interfaces, 0 wrapped.
+- **INDEX_VERSION** `v18-inherited-dispatch` → `v19-inherited-iface-method`: CALLS change for unchanged files.
+- **Measured** (scratch DBs, full runs; base = `dist/base-row5` built from 235e091 sources, fix = the row's build):
+  - wec.social-ads @3dbf741 (4 uncommitted files there, the same tree for both runs): CALLS rows 21 167 → 21 065.
+    Removed 168 `resolved interface method (unproven receiver)` + 162 `interface-dispatch` (the wrong guesses —
+    `ICampaignApprovalRepository.Update/GetByIdAsync/Add` 92, `ICampaignYoutubeRepository.AddAsync` 9, … — and
+    their fan-out). Added 32 `resolved interface method` (the inherited binds: `IPureRepository.AddAsync / Update /
+    GetByIdAsync / ExistsAsync` through `ITenantRepository`, `IMediaRepository`, …; `IFileStorageService.UploadFileAsync`
+    through `IPublicFileStorageService`) + 32 `interface-dispatch` (`PureRepository.*`, and
+    `PublicS3FileStorageService.UploadFileAsync`, the only implementer of `IPublicFileStorageService`) + 164 bare rows
+    demoted to `superseded by qualified call`. No `base-class-dispatch` edge was added.
+  - wec.communication-hub @8d94c68 (clean): 23 950 → 23 905. Removed 20 unproven binds + 45 of their dispatch edges,
+    each a bare guess its qualified sibling disproved (sampled against source: `_identityService` is
+    `IIdentityService`, not `IIdentityAuthorizationClient`; `_customerSuggestCache` is `ICustomerSuggestCache`, not
+    `IConversationSuggestCache`; `_labelResolver` is `INotificationLabelResolver`, not `ICustomerDisplayNameResolver`;
+    `ConversationEmailSenderResolver.ResolveAsync` is a static class call). No inherited-interface call in that repo.
+  - mcp-local @9b3867f (TS/JS/Py): CALLS identical at sha256 level (14 403 rows), base and fix run back to back.
+- **Tests:** `test:interface-dispatch` section 8 (real C# extraction: the inherited `AddAsync` through `ITenantRepository`
+  and a derived generic `IScopedTenantRepository<T>`, a same-file `IAuditLog.AddAsync`, a decoy
+  `ICampaignRepository.AddAsync` sorting first, and an overriding non-implementer `AudienceRepository`) — red at 235e091
+  (`IAuditLog.AddAsync` + `ICampaignRepository.AddAsync (unproven receiver)`), green with the fix.
+  `interfaceSiblings.test.ts` covers `interfaceBaseNames` and `pickInterfaceMethod`; `dispatchRebuild.test.ts` covers
+  `unifyInterfaceVia`; `runPolicy.test.ts` the v19 generation and the escalation from v18.
+- **Found on the way:** MCP-ISSUE-137 (base-class fan-out finds an override by the subclass's FILE).

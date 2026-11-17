@@ -261,6 +261,106 @@ export function pickInheritedMethod<T extends MemberCandidate>(
   return undefined;
 }
 
+/** How many interfaces the base-interface walk visits — a guard against bad data, not a real hierarchy size. */
+const MAX_INTERFACE_WALK = 64;
+
+/**
+ * MCP-ISSUE-133 (row 5): the base interfaces named in an interface's stored signature, generic arguments and
+ * namespace qualifiers dropped: `public interface ITenantRepository : IPureRepository<Tenant>` → `IPureRepository`,
+ * `export interface A<T> extends B<T>, ns.C {` → `B`, `C`.
+ *
+ * The C# extractor emits no edge for an interface's base list (its IMPLEMENTS / EXTENDS edges are for class,
+ * struct and record declarations), so the signature — the declaration's first line — is the only record of it. A
+ * base list wrapped onto a later line, or a signature cut at 300 characters inside the list, loses the bases
+ * that are not on it: a missed base, never a wrong one. A C# `where` clause ends the list; a TS `{` too.
+ */
+export function interfaceBaseNames(signature: string | null, name: string): string[] {
+  if (!signature) return [];
+  const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const head = new RegExp(`\\binterface\\s+${escaped}(?![\\w$])`).exec(signature);
+  if (!head) return [];
+  let i = head.index + head[0].length;
+  const skipSpace = () => {
+    while (i < signature.length && /\s/.test(signature[i])) i++;
+  };
+  skipSpace();
+  if (signature[i] === "<") {
+    let depth = 0;
+    for (; i < signature.length; i++) {
+      if (signature[i] === "<") depth++;
+      else if (signature[i] === ">" && --depth === 0) {
+        i++;
+        break;
+      }
+    }
+    skipSpace();
+  }
+  if (signature[i] === ":") i++;
+  else if (signature.startsWith("extends", i) && !/[\w$]/.test(signature[i + 7] ?? "")) i += 7;
+  else return [];
+
+  const items: string[] = [];
+  let depth = 0;
+  let start = i;
+  let end = signature.length;
+  for (let j = i; j < signature.length; j++) {
+    const ch = signature[j];
+    if (ch === "<" || ch === "(" || ch === "[") depth++;
+    else if (ch === ">" || ch === ")" || ch === "]") depth--;
+    else if (depth === 0 && ch === ",") {
+      items.push(signature.slice(start, j));
+      start = j + 1;
+    } else if (depth === 0 && (ch === "{" || (/\s/.test(signature[j - 1] ?? "") && /^where(?![\w$])/.test(signature.slice(j))))) {
+      end = j;
+      break;
+    }
+  }
+  // A list still open at the end of the signature (`...` truncation, an unclosed `<`) has an incomplete last item.
+  const truncated = end === signature.length && (depth !== 0 || signature.endsWith("..."));
+  items.push(signature.slice(start, end));
+  if (truncated) items.pop();
+
+  const names: string[] = [];
+  for (const item of items) {
+    const bare = item.replace(/<[\s\S]*$/, "").trim();
+    const last = bare.split(".").pop()?.trim() ?? "";
+    if (/^[A-Za-z_$][\w$]*$/.test(last) && last !== name && !names.includes(last)) names.push(last);
+  }
+  return names;
+}
+
+/** An interface's resolved in-repo base interface and the file that declares it. */
+export type InterfaceBase = { baseId: string; filePath: string };
+
+/**
+ * MCP-ISSUE-133 (row 5): the method `name` an interface exposes — its own declaration, else the nearest one up its
+ * base interfaces (`ITenantRepository : IPureRepository<Tenant>` where only `IPureRepository` declares `AddAsync`).
+ * Breadth-first in base-list order, so the nearest declaration wins and, between two bases at the same distance,
+ * the one listed first. Every step binds by owner exactly as `pickOwnedMethod` does: another interface's method in
+ * the same file is never this interface's. Cycles and walks past MAX_INTERFACE_WALK interfaces stop with no pick.
+ */
+export function pickInterfaceMethod<T extends MemberCandidate>(
+  candidates: readonly T[],
+  basesOf: (interfaceId: string) => readonly InterfaceBase[] | undefined,
+  interfaceId: string,
+  interfaceFile: string,
+  name: string,
+  arity: number | null
+): T | undefined {
+  const seen = new Set<string>([interfaceId]);
+  const queue: InterfaceBase[] = [{ baseId: interfaceId, filePath: interfaceFile }];
+  for (let k = 0; k < queue.length && k < MAX_INTERFACE_WALK; k++) {
+    const own = pickOwnedMethod(candidates, queue[k].baseId, queue[k].filePath, name, arity);
+    if (own) return own;
+    for (const base of basesOf(queue[k].baseId) ?? []) {
+      if (seen.has(base.baseId)) continue;
+      seen.add(base.baseId);
+      queue.push(base);
+    }
+  }
+  return undefined;
+}
+
 /**
  * The first resolved in-repo base class of `classId` (rowid = extraction order), or undefined. Python classes
  * are skipped: their dispatch walks the C3 MRO in edgeResolverCalls, not this single chain.

@@ -3,7 +3,7 @@ import test from "node:test";
 import Database from "better-sqlite3";
 
 import { initGraphSchema, runGraphMigrations } from "../../repositories/schema.js";
-import { rebuildInterfaceDispatchEdges } from "./edgeResolverCalls.js";
+import { IFACE_VIA_MARK, rebuildInterfaceDispatchEdges, unifyInterfaceVia, type ResolvedUpdate } from "./edgeResolverCalls.js";
 import { resolveBaseClassDispatch } from "./edgeResolverContracts.js";
 
 /**
@@ -206,4 +206,28 @@ test("MCP-ISSUE-133 (row #10): base-class fan-out from an inherited dispatch rea
     ["direct>Other.Save", "viaIface>Sub.Save"],
     "the interface caller reaches the implementer's subclass override, never AudienceStore's; a direct caller of the base keeps the base's fan-out"
   );
+});
+
+test("MCP-ISSUE-133 (row 5): unifyInterfaceVia — one marker per (caller, target); a plain proven bind clears it", () => {
+  const proven = "resolved interface method";
+  const unproven = "resolved interface method (unproven receiver)";
+  const u = (fromId: string, oldToId: string, newToId: string, reason: string, via?: string): ResolvedUpdate => ({
+    fromId, oldToId, newToId, confidence: 0.8, reason, via
+  });
+  // The bare half that guessed the same method joins its qualified half; two receivers merge, sorted.
+  const a = [
+    u("h", "callee:ITenant.Add", "IPure.Add", proven, `${IFACE_VIA_MARK}t`),
+    u("h", "callee:IMedia.Add", "IPure.Add", proven, `${IFACE_VIA_MARK}m`),
+    u("h", "callee:Add", "IPure.Add", unproven)
+  ];
+  unifyInterfaceVia(a);
+  assert.deepEqual(a.map((x) => x.via), [`${IFACE_VIA_MARK}m,t`, `${IFACE_VIA_MARK}m,t`, `${IFACE_VIA_MARK}m,t`]);
+  // A proven call through the declaring interface itself takes the whole implementer set: no marker.
+  const b = [u("h", "callee:ITenant.Add", "IPure.Add", proven, `${IFACE_VIA_MARK}t`), u("h", "callee:IPure.Add", "IPure.Add", proven)];
+  unifyInterfaceVia(b);
+  assert.deepEqual(b.map((x) => x.via), [null, null]);
+  // Other callers, other targets and other reasons are left alone.
+  const c = [u("g", "callee:ITenant.Add", "IPure.Add", proven, `${IFACE_VIA_MARK}t`), u("h", "callee:Add", "IPure.Add", unproven), u("g", "callee:X", "Y", "resolved callee by name")];
+  unifyInterfaceVia(c);
+  assert.deepEqual(c.map((x) => x.via), [`${IFACE_VIA_MARK}t`, undefined, undefined]);
 });

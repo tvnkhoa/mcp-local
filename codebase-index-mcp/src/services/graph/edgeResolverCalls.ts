@@ -21,7 +21,15 @@ import {
   stripGenerics,
 } from "../../repositories/vectorStore.js";
 import { buildNamedCandidateMap, pickBestNamedCandidate } from "./edgeResolverShared.js";
-import { parameterCount, pickInheritedMethod, type ClassBase, type MemberCandidate } from "./interfaceSiblings.js";
+import {
+  interfaceBaseNames,
+  parameterCount,
+  pickInheritedMethod,
+  pickInterfaceMethod,
+  type ClassBase,
+  type InterfaceBase,
+  type MemberCandidate
+} from "./interfaceSiblings.js";
 import { buildImportedFilesByFile, isPythonFile, normalizeFilePath, pythonImportedFilesForName } from "./moduleResolution.js";
 import { immediateTransaction } from "../../repositories/sqliteTx.js";
 import { PYTHON_ARGS_HINT, PYTHON_RECEIVER_HINT } from "../extractors/pythonNoise.js";
@@ -30,9 +38,9 @@ import { isTestPath } from "../indexing/fileFilter.js";
 /**
  * The two `reason` labels that mean "this target came from the callee's NAME alone, across files".
  *
- * Named because MCP-ISSUE-052's suppression keys off exactly this population: a same-file match or a
- * receiver-typed match is evidence, a cross-file name match is a guess, and only a guess may be
- * overruled by a qualified sibling.
+ * Named because MCP-ISSUE-052's suppression keys off this population (`SUPPRESSIBLE_BARE_REASONS`): a
+ * receiver-typed match is evidence, a name match is a guess, and only a guess may be overruled by a
+ * qualified sibling.
  */
 const NAME_ONLY_REASON = "resolved callee by name";
 const NAME_ONLY_AMBIGUOUS_REASON = "resolved callee by name (ambiguous)";
@@ -43,7 +51,22 @@ const NAME_ONLY_AMBIGUOUS_REASON = "resolved callee by name (ambiguous)";
  */
 const INTERFACE_METHOD_REASON = "resolved interface method";
 const INTERFACE_METHOD_UNPROVEN_REASON = "resolved interface method (unproven receiver)";
-const NAME_ONLY_REASONS: ReadonlySet<string> = new Set([NAME_ONLY_REASON, NAME_ONLY_AMBIGUOUS_REASON]);
+/**
+ * MCP-ISSUE-133 (row 5): the bare-token labels a qualified sibling may overrule (MCP-ISSUE-052). An unproven
+ * interface bind is a name guess too — it only noticed afterwards that the winner sat on an interface — so when
+ * `tenants.AddAsync(t)` proved `IPureRepository.AddAsync`, the bare `AddAsync` that guessed
+ * `ICampaignRepository.AddAsync` is the wrong half of the same call site.
+ */
+const SUPPRESSIBLE_BARE_REASONS: ReadonlySet<string> = new Set([NAME_ONLY_REASON, NAME_ONLY_AMBIGUOUS_REASON, INTERFACE_METHOD_UNPROVEN_REASON]);
+/**
+ * MCP-ISSUE-133 (row 5): the `assigned_expression` of a proven interface bind that reached the method through the
+ * receiver's BASE interface — `iface-via:<receiver interface ids, comma-separated>`. The edge targets the base
+ * interface's method (`IPureRepository.AddAsync`), so without it the fan-out would take every implementer of the
+ * base and their subclasses; with it, `planTypedDispatch` fans out from the RECEIVER's implementers
+ * (`ITenantRepository` → `TenantRepository`). Only this lane reads it: `getFieldAccesses` reads the column for
+ * PROPERTY_* rows only, and the Python lanes match their own `pyrecv:` / `pyargs:` / `pyset` values.
+ */
+export const IFACE_VIA_MARK = "iface-via:";
 
 /** PY-6: `obj.m()` whose receiver no rule typed, bound to a method named `m` by name alone (confidence 0.6). */
 const PYTHON_UNTYPED_RECEIVER_REASON = "resolved callee by name (untyped receiver)";
@@ -92,6 +115,12 @@ export interface CallResolutionContext {
   /** ISSUE-022: symbolIds của mọi interface — detect bare-name match trúng interface method để fan-out. */
   interfaceIdSet: Set<string>;
   /**
+   * MCP-ISSUE-133 (row 5): each C#/TS interface's in-repo base interfaces, in base-list order, read from its
+   * signature (`interfaceBaseNames`) and bound by name like any other candidate — same file, then a file the
+   * declaring file imports, then the tie-break. A base declared outside the repo has no entry.
+   */
+  interfaceBasesById: Map<string, InterfaceBase[]>;
+  /**
    * MCP-ISSUE-037: subclass files per base-class symbolId — the class-inheritance counterpart of
    * the implementor map `rebuildInterfaceDispatchEdges` builds. Populated from resolved `EXTENDS` edges.
    */
@@ -132,8 +161,8 @@ export function buildCallResolutionContext(db: Database.Database, repoId: string
   const interfaceRows = db
     // `interfaceByName` keeps the first row per name, so ordering decides which declaration of a
     // duplicated interface name wins.
-    .prepare(`select symbol_id as symbolId, name, file_path as filePath from symbols where repo_id = ? and kind = 'interface' order by name, file_path, symbol_id`)
-    .all(repoId) as { symbolId: string; name: string; filePath: string }[];
+    .prepare(`select symbol_id as symbolId, name, file_path as filePath, signature from symbols where repo_id = ? and kind = 'interface' order by name, file_path, symbol_id`)
+    .all(repoId) as { symbolId: string; name: string; filePath: string; signature: string | null }[];
   const interfaceByName = new Map<string, { symbolId: string; filePath: string }>();
   const interfaceIdSet = new Set<string>();
   const pythonInterfacesByName = new Map<string, NamedCandidate[]>();
@@ -146,6 +175,8 @@ export function buildCallResolutionContext(db: Database.Database, repoId: string
     if (list) list.push(candidate);
     else pythonInterfacesByName.set(r.name, [candidate]);
   }
+
+  const interfaceBasesById = buildInterfaceBases(interfaceRows, importedFilesByFile);
 
   // MCP-ISSUE-037: the class-inheritance mirror of the two structures above. `EXTENDS` is resolved before
   // this runs, so `to_id` is a real class symbolId; rows still holding a `base:` token are framework bases
@@ -217,7 +248,38 @@ export function buildCallResolutionContext(db: Database.Database, repoId: string
     )
     .all({ repoId, supersededReason: SUPERSEDED_REASON }) as { fromId: string; toId: string; fromFile: string }[];
 
-  return { candidateMap, interfaceByName, pythonInterfacesByName, interfaceIdSet, subclassFilesByBaseId, basesByClassId, virtualMethodIds, updateStmt, unresolvedRows, offset: 0, importedFilesByFile };
+  return { candidateMap, interfaceByName, pythonInterfacesByName, interfaceIdSet, interfaceBasesById, subclassFilesByBaseId, basesByClassId, virtualMethodIds, updateStmt, unresolvedRows, offset: 0, importedFilesByFile };
+}
+
+/**
+ * MCP-ISSUE-133 (row 5): each non-Python interface's in-repo base interfaces, in base-list order. Built from the
+ * signature, the only record of an interface's base list (`interfaceBaseNames`); a name binds to an interface
+ * of that name as the call lane binds any name — same file, then an imported file, then the first by path.
+ */
+function buildInterfaceBases(
+  interfaceRows: readonly { symbolId: string; name: string; filePath: string; signature: string | null }[],
+  importedFilesByFile: Map<string, Set<string>>
+): Map<string, InterfaceBase[]> {
+  const byName = new Map<string, NamedCandidate[]>();
+  for (const r of interfaceRows) {
+    if (isPythonFile(r.filePath)) continue;
+    const list = byName.get(r.name) ?? [];
+    list.push({ symbolId: r.symbolId, filePath: r.filePath, kind: "interface", parentSymbolId: null });
+    byName.set(r.name, list);
+  }
+  const out = new Map<string, InterfaceBase[]>();
+  for (const r of interfaceRows) {
+    if (isPythonFile(r.filePath)) continue;
+    const bases: InterfaceBase[] = [];
+    for (const baseName of interfaceBaseNames(r.signature, r.name)) {
+      const base = pickBestNamedCandidate(byName.get(baseName) ?? [], r.filePath, ["interface"], importedFilesByFile.get(normalizeFilePath(r.filePath)));
+      if (base && base.symbolId !== r.symbolId && !bases.some((b) => b.baseId === base.symbolId)) {
+        bases.push({ baseId: base.symbolId, filePath: base.filePath });
+      }
+    }
+    if (bases.length > 0) out.set(r.symbolId, bases);
+  }
+  return out;
 }
 
 /**
@@ -428,7 +490,40 @@ function pythonMro(basesByClassId: ReadonlyMap<string, string[]>, classId: strin
   return order;
 }
 
-export type ResolvedUpdate = { fromId: string; oldToId: string; newToId: string; confidence: number; reason: string };
+export type ResolvedUpdate = {
+  fromId: string;
+  oldToId: string;
+  newToId: string;
+  confidence: number;
+  reason: string;
+  /** MCP-ISSUE-133 (row 5): an `IFACE_VIA_MARK` value written to `assigned_expression`; absent leaves it as is. */
+  via?: string | null;
+};
+
+/**
+ * MCP-ISSUE-133 (row 5): give every interface-bind row of one (caller, target) the same `via` value, so the rows
+ * stay duplicates of each other for `deduplicateResolvedEdges` (which groups by `assigned_expression`) and the
+ * fan-out reads one answer. A proven bind through the declaring interface itself is the whole implementer set, so
+ * it clears the marker; otherwise the receivers are merged — the bare half of a call site that guessed the same
+ * method joins its qualified half.
+ */
+export function unifyInterfaceVia(updates: ResolvedUpdate[]): void {
+  const groups = new Map<string, ResolvedUpdate[]>();
+  for (const u of updates) {
+    if (u.reason !== INTERFACE_METHOD_REASON && u.reason !== INTERFACE_METHOD_UNPROVEN_REASON) continue;
+    const key = `${u.fromId}\u0000${u.newToId}`;
+    const group = groups.get(key);
+    if (group) group.push(u);
+    else groups.set(key, [u]);
+  }
+  for (const group of groups.values()) {
+    const vias = group.flatMap((u) => (u.via ? u.via.slice(IFACE_VIA_MARK.length).split(",") : []));
+    if (vias.length === 0) continue;
+    const plain = group.some((u) => !u.via && u.reason === INTERFACE_METHOD_REASON);
+    const merged = plain ? null : IFACE_VIA_MARK + [...new Set(vias)].sort().join(",");
+    for (const u of group) u.via = merged;
+  }
+}
 
 /**
  * MCP-ISSUE-052 — drop the bare half of a qualified call site once the qualified half has answered it.
@@ -484,7 +579,7 @@ export function suppressBareCallsShadowedByQualified(updates: ResolvedUpdate[]):
     const token = u.oldToId.slice(7);
     if (token.includes(".")) continue;
     if (u.newToId === u.oldToId) continue;
-    if (!NAME_ONLY_REASONS.has(u.reason)) continue;
+    if (!SUPPRESSIBLE_BARE_REASONS.has(u.reason)) continue;
     const proven = provenByCaller.get(u.fromId)?.get(token);
     if (!proven || proven.has(u.newToId)) continue;
     u.newToId = u.oldToId;
@@ -548,6 +643,8 @@ export function resolveCallEdgesBatch(
      * afterwards noticed the winner happened to sit on an interface — a guess wearing a proof's label.
      */
     let dispatchVia: "receiver_type" | "name" = "receiver_type";
+    // MCP-ISSUE-133 (row 5): the receiver interface, when the method it binds is declared on one of its bases.
+    let ifaceVia: string | null = null;
     // MCP-ISSUE-052: HOW the match was obtained, not just what it is. The receiver-as-class branch
     // added by MCP-ISSUE-036 shared the "resolved callee by name" label with the name-only fallback,
     // so a correct receiver-typed edge and a blind name guess were indistinguishable in `reason` —
@@ -608,12 +705,26 @@ export function resolveCallEdgesBatch(
           // (`Executor.close` beside `Store.close`); the file match alone picked whichever id sorted first.
           // The owner link decides. MCP-ISSUE-133: for C#/TS too — a file declaring two interfaces with a
           // same-named member gave every call the first one's; the file match stays for rows with no owner link.
-          const ifaceMethod =
-            memberCandidates.find((c) => c.kind === "method" && c.parentSymbolId === iface.symbolId) ??
-            memberCandidates.find((c) => c.filePath === iface.filePath && c.kind === "method");
+          //
+          // MCP-ISSUE-133 (row 5), C#/TS: the member may be one the interface only INHERITS
+          // (`ITenantRepository : IPureRepository<Tenant>`, `AddAsync` declared on the base). The walk goes up
+          // the base interfaces before anything else, and the file match is only for rows with no owner link:
+          // another interface's same-named member in the receiver's file is not the receiver's.
+          const ifaceMethod = isPythonFile(row.fromFile)
+            ? memberCandidates.find((c) => c.kind === "method" && c.parentSymbolId === iface.symbolId) ??
+              memberCandidates.find((c) => c.filePath === iface.filePath && c.kind === "method")
+            : pickInterfaceMethod(
+                memberCandidates.filter((c) => c.kind === "method").map((c) => ({ ...c, signature: null })),
+                (id) => ctx.interfaceBasesById.get(id),
+                iface.symbolId,
+                iface.filePath,
+                memberName,
+                null
+              );
           if (ifaceMethod) {
             match = ifaceMethod;
             dispatchMethodName = memberName;
+            if (!isPythonFile(row.fromFile) && ifaceMethod.parentSymbolId !== iface.symbolId) ifaceVia = IFACE_VIA_MARK + iface.symbolId;
           }
         }
       }
@@ -734,7 +845,8 @@ export function resolveCallEdgesBatch(
         oldToId: row.toId,
         newToId: match.symbolId,
         confidence: untypedPythonReceiver ? 0.6 : confidence,
-        reason: untypedPythonReceiver ? PYTHON_UNTYPED_RECEIVER_REASON : reason
+        reason: untypedPythonReceiver ? PYTHON_UNTYPED_RECEIVER_REASON : reason,
+        via: reason === INTERFACE_METHOD_REASON ? ifaceVia : null
       });
 
       // Release L (MCP-ISSUE-094): the interface-dispatch fan-out is no longer written here. It is rebuilt
@@ -764,6 +876,7 @@ export function resolveCallEdgesBatch(
   // MCP-ISSUE-052: runs last so it sees every resolution this caller produced.
   // Batch boundaries are extended above so a caller's bare and qualified rows are never split.
   suppressBareCallsShadowedByQualified(updates);
+  unifyInterfaceVia(updates);
 
   if (updates.length === 0) return 0;
 
@@ -777,7 +890,8 @@ export function resolveCallEdgesBatch(
       old_to_id text not null,
       new_to_id text not null,
       confidence real not null,
-      reason text not null
+      reason text not null,
+      via text
     )
   `);
   // Ensure composite index on temp table for fast UPDATE JOIN matching
@@ -785,14 +899,14 @@ export function resolveCallEdgesBatch(
   db.exec(`delete from _resolve_batch`);
 
   const insertBatch = db.prepare(
-    `insert into _resolve_batch (from_id, old_to_id, new_to_id, confidence, reason) values (?, ?, ?, ?, ?)`
+    `insert into _resolve_batch (from_id, old_to_id, new_to_id, confidence, reason, via) values (?, ?, ?, ?, ?, ?)`
   );
 
   // Single transaction: fill temp table + UPDATE JOIN
   // Avoids multiple transaction open/close overhead on large batches
   const batchTx = immediateTransaction(db, () => {
     for (const u of updates) {
-      insertBatch.run(u.fromId, u.oldToId, u.newToId, u.confidence, u.reason);
+      insertBatch.run(u.fromId, u.oldToId, u.newToId, u.confidence, u.reason, u.via ?? null);
     }
 
     // Single UPDATE JOIN — resolves all rows in one statement
@@ -801,7 +915,13 @@ export function resolveCallEdgesBatch(
       set
         to_id = b.new_to_id,
         confidence = b.confidence,
-        reason = b.reason
+        reason = b.reason,
+        -- MCP-ISSUE-133 (row 5): an interface bind writes its receiver marker; every other row keeps its value
+        -- (the Python lanes' extraction hints live in this column).
+        assigned_expression = case
+          when b.reason in ('${INTERFACE_METHOD_REASON}', '${INTERFACE_METHOD_UNPROVEN_REASON}') then b.via
+          else edges.assigned_expression
+        end
       from _resolve_batch b
       where edges.repo_id = ?
         and edges.from_id = b.from_id
@@ -881,14 +1001,30 @@ export function rebuildInterfaceDispatchEdges(db: Database.Database, repoId: str
   return count;
 }
 
-/** A CALLS edge into an interface method; `proven` is 1 when one of its rows is a proven-receiver bind. */
-type InterfaceCall = { fromId: string; methodId: string; name: string; ifaceId: string; signature: string | null; proven: number };
+/**
+ * A CALLS edge into an interface method; `proven` is 1 when one of its rows is a proven-receiver bind. MCP-ISSUE-133
+ * (row 5): `via` lists the receiver interfaces of rows that reached the method through a base interface
+ * (comma-separated ids, null when none), and `plain` is 1 when some row did not — the declaring interface's whole
+ * implementer set applies then.
+ */
+type InterfaceCall = {
+  fromId: string;
+  methodId: string;
+  name: string;
+  ifaceId: string;
+  signature: string | null;
+  proven: number;
+  via: string | null;
+  plain: number;
+};
 
 function interfaceCalls(db: Database.Database, repoId: string): InterfaceCall[] {
   return db
     .prepare(
       `select e.from_id as fromId, s.symbol_id as methodId, s.name as name, s.parent_symbol_id as ifaceId, s.signature as signature,
-              max(e.reason = ?) as proven
+              max(e.reason = ?) as proven,
+              group_concat(distinct case when e.reason = ? and e.assigned_expression like ? then substr(e.assigned_expression, ?) end) as via,
+              max(e.reason != ? or e.assigned_expression is null or e.assigned_expression not like ?) as plain
        from edges e
        inner join symbols s on s.repo_id = e.repo_id and s.symbol_id = e.to_id
        inner join symbols i on i.repo_id = s.repo_id and i.symbol_id = s.parent_symbol_id and i.kind = 'interface'
@@ -896,7 +1032,17 @@ function interfaceCalls(db: Database.Database, repoId: string): InterfaceCall[] 
        group by e.from_id, s.symbol_id
        order by e.from_id, s.symbol_id`
     )
-    .all(INTERFACE_METHOD_REASON, repoId, INTERFACE_METHOD_REASON, INTERFACE_METHOD_UNPROVEN_REASON) as InterfaceCall[];
+    .all(
+      INTERFACE_METHOD_REASON,
+      INTERFACE_METHOD_REASON,
+      `${IFACE_VIA_MARK}%`,
+      IFACE_VIA_MARK.length + 1,
+      INTERFACE_METHOD_REASON,
+      `${IFACE_VIA_MARK}%`,
+      repoId,
+      INTERFACE_METHOD_REASON,
+      INTERFACE_METHOD_UNPROVEN_REASON
+    ) as InterfaceCall[];
 }
 
 /** Implementer types per interface: typed languages by type and file (MCP-ISSUE-133), Python by class id (PY-6). */
@@ -947,6 +1093,12 @@ export type TypedDispatch = { fromId: string; targetId: string; implId: string }
  * interface the call goes through: on wec.social-ads it picked `ICampaignYoutubeRepository.AddAsync` for calls on
  * seven other repositories, and the inherited walk turned the guess into edges to `PureRepository.AddAsync` — one
  * of them past an override. Own-member dispatch from an unproven bind is unchanged.
+ *
+ * MCP-ISSUE-133 (row 5): a call that reached a base interface's method through its receiver (`tenants.AddAsync` with
+ * `ITenantRepository : IPureRepository<Tenant>`, see `IFACE_VIA_MARK`) fans out from the RECEIVER's implementers and
+ * those of interfaces deriving from it — `TenantRepository`, which inherits `PureRepository.AddAsync` — not from every
+ * implementer of the base. Taking the base's set sent the base-class fan-out into `MetaAudienceRepository`'s
+ * overrides for calls made on other repositories (27 edges on wec.social-ads).
  */
 export function planTypedDispatch(
   db: Database.Database,
@@ -974,16 +1126,50 @@ export function planTypedDispatch(
   const classBases = buildClassBases(db, repoId);
   const inherited = (id: string): ClassBase | undefined => classBases.get(id);
   const ownOnly = (): ClassBase | undefined => undefined;
+  let derived: Map<string, string[]> | undefined;
+  const receiverImplementors = (receiverId: string): { implId: string; filePath: string }[] => {
+    derived ??= derivedInterfaces(db, repoId);
+    const seen = new Set<string>([receiverId]);
+    const queue = [receiverId];
+    for (let k = 0; k < queue.length; k++) {
+      for (const child of derived.get(queue[k]) ?? []) {
+        if (seen.has(child)) continue;
+        seen.add(child);
+        queue.push(child);
+      }
+    }
+    return queue.flatMap((id) => implementors.get(id) ?? []);
+  };
   const out: TypedDispatch[] = [];
   for (const call of calls) {
     const arity = parameterCount(call.signature, call.name);
     const baseOf = call.proven ? inherited : ownOnly;
-    const listed = implementors.get(call.ifaceId) ?? [];
+    const all = [
+      ...(call.plain ? implementors.get(call.ifaceId) ?? [] : []),
+      ...(call.via ? [...new Set(call.via.split(","))].sort().flatMap(receiverImplementors) : [])
+    ];
+    const listed = all.filter((i, k) => all.findIndex((j) => j.implId === i.implId) === k);
     const cappedFiles = new Set([...new Set(listed.map((i) => i.filePath))].slice(0, MAX_INTERFACE_DISPATCH_FANOUT));
     for (const { implId, filePath } of listed.filter((i) => cappedFiles.has(i.filePath))) {
       const impl = pickInheritedMethod(methodRows(call.name), baseOf, implId, filePath, call.name, arity);
       if (!impl || impl.symbolId === call.methodId) continue;
       out.push({ fromId: call.fromId, targetId: impl.symbolId, implId });
+    }
+  }
+  return out;
+}
+
+/** MCP-ISSUE-133 (row 5): the interfaces that list each interface as a base (`buildInterfaceBases`, inverted). */
+function derivedInterfaces(db: Database.Database, repoId: string): Map<string, string[]> {
+  const rows = db
+    .prepare(`select symbol_id as symbolId, name, file_path as filePath, signature from symbols where repo_id = ? and kind = 'interface' order by name, file_path, symbol_id`)
+    .all(repoId) as { symbolId: string; name: string; filePath: string; signature: string | null }[];
+  const out = new Map<string, string[]>();
+  for (const [childId, bases] of buildInterfaceBases(rows, buildImportedFilesByFile(db, repoId))) {
+    for (const { baseId } of bases) {
+      const list = out.get(baseId);
+      if (list) list.push(childId);
+      else out.set(baseId, [childId]);
     }
   }
   return out;
