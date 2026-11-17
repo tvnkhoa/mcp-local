@@ -208,6 +208,125 @@ test("lanes: a worker that dies fails only its own waiters; the other lane answe
   await c.dispose();
 });
 
+// Row 1 review: a memo hit handed out the stored array, so a caller that sorted or edited it changed every later answer.
+test("memo: neither the first caller nor a memo hit holds the stored rows", async () => {
+  const { c } = client(answersAtOnce);
+  const first = await c.search("r", "foo", 5, 1_000);
+  assert.ok("rows" in first);
+  first.rows[0]!.symbolId = "edited-by-first-caller";
+  const hit = await c.search("r", "foo", 5, 1_000);
+  assert.ok("rows" in hit);
+  assert.deepEqual(hit.rows, [{ symbolId: "s1", distance: 0.5 }]);
+  hit.rows.push({ symbolId: "pushed", distance: 1 });
+  hit.rows[0]!.distance = 9;
+  assert.deepEqual(await c.search("r", "foo", 5, 1_000), { rows: [{ symbolId: "s1", distance: 0.5 }] }, "the next hit is unchanged");
+  await c.dispose();
+});
+
+// MCP-ISSUE-135: a better-sqlite3 scan cannot be interrupted, so a lane whose scan outlives the cap is replaced.
+test("lane cap: a scan past laneCapMs retires its lane — waiters settled, worker terminated, the next search gets a fresh lane", async () => {
+  const terminated: FakeWorker[] = [];
+  const spawned: FakeWorker[] = [];
+  const c = new VectorSearchWorkerClient("db.sqlite", {
+    laneCapMs: 80,
+    spawn: () => {
+      const w = new FakeWorker((req, reply) => {
+        if (!req.text.startsWith("stuck")) setImmediate(() => reply({ kind: "result", id: req.id, rows: [], ms: 1 }));
+      });
+      const kill = w.terminate.bind(w);
+      w.terminate = () => {
+        terminated.push(w);
+        return kill();
+      };
+      spawned.push(w);
+      return w as unknown as VectorWorkerLike;
+    }
+  });
+  const keepAlive = setInterval(() => {}, 1_000);
+  const t0 = performance.now();
+  assert.deepEqual(await c.search("r", "stuck-a", 5, 20), { skipped: "budget" }, "the caller gives up at its budget");
+  void c.search("r", "stuck-b", 5, 20);
+  // Both lanes busy: this one queues behind a stuck scan, with a budget longer than the cap.
+  const queued = c.search("r", "stuck-queued", 5, 10_000);
+  assert.equal(spawned.length, MAX_WORKERS);
+  assert.equal(c.pendingCount, 3);
+  assert.deepEqual(await queued, { skipped: "worker-error" }, "the waiter behind the stuck scan is released at the cap, not at its budget");
+  assert.ok(performance.now() - t0 < 2_000, `released at the cap (${String(Math.round(performance.now() - t0))} ms)`);
+  await new Promise((r) => setTimeout(r, 20));
+  assert.equal(c.retiredCount, 2);
+  assert.deepEqual(terminated, spawned, "every stuck worker was terminated");
+  assert.equal(c.workerCount, 0);
+  assert.equal(c.pendingCount, 0, "a retired lane's requests no longer count against MAX_PENDING");
+  assert.deepEqual(await c.search("r", "fine", 5, 1_000), { rows: [] });
+  assert.equal(spawned.length, 3, "a fresh lane answered");
+  clearInterval(keepAlive);
+  await c.dispose();
+});
+
+test("lane cap: it bounds ONE scan — a lane answering each request inside the cap is never retired, however long its queue", async () => {
+  // A serial fake: each request is answered 40 ms after the previous one, as a real worker scans one at a time.
+  const c = new VectorSearchWorkerClient("db.sqlite", {
+    laneCapMs: 70,
+    spawn: () => {
+      let tail = Promise.resolve();
+      const w = new FakeWorker((req, reply) => {
+        tail = tail.then(() => new Promise<void>((r) => setTimeout(() => {
+          reply({ kind: "result", id: req.id, rows: [{ symbolId: req.text, distance: 0 }], ms: 40 });
+          r();
+        }, 40)));
+      });
+      return w as unknown as VectorWorkerLike;
+    }
+  });
+  const outs = await Promise.all(Array.from({ length: MAX_PENDING }, (_, i) => c.search("r", `q${String(i)}`, 5, 5_000)));
+  assert.deepEqual(outs.map((o) => ("rows" in o ? o.rows[0]!.symbolId : o.skipped)), ["q0", "q1", "q2", "q3"]);
+  assert.equal(c.retiredCount, 0, "2 x 40 ms on one lane exceeds the 70 ms cap in total, but no single scan does");
+  await c.dispose();
+});
+
+test("expired: a request still queued at its deadline is dropped unscanned; the caller sees `budget` and nothing is memoized", async () => {
+  let opened = 0;
+  const h = createSearchHandler({
+    open: () => {
+      opened++;
+      throw new Error("no db in this test");
+    },
+    loadVec: () => true,
+    now: () => 1_000
+  });
+  const req = (deadline: number | undefined): SearchReq => ({ kind: "search", id: 7, dbPath: "x", repoId: "r", text: "t", k: 1, ...(deadline === undefined ? {} : { deadline }) });
+  assert.deepEqual(h.answer(req(1_000)), { kind: "expired", id: 7 });
+  assert.deepEqual(h.answer(req(999)), { kind: "expired", id: 7 });
+  assert.equal(opened, 0, "an expired request opens nothing and scans nothing");
+  assert.equal(h.answer(req(1_001)).kind, "error", "a request inside its deadline is scanned (here: the open fails)");
+  assert.equal(h.answer(req(undefined)).kind, "error", "no deadline: always scanned");
+  assert.equal(opened, 2, "each scanned request tried to open: the two without an expired deadline");
+
+  const { c, spawned } = client((r, reply) => setImmediate(() => reply({ kind: "expired", id: r.id })));
+  assert.deepEqual(await c.search("r", "late", 5, 1_000), { skipped: "budget" });
+  await c.search("r", "late", 5, 1_000);
+  assert.equal(spawned[0]!.posted.filter((r) => r.kind === "search").length, 2, "an expired answer is not memoized");
+  await c.dispose();
+});
+
+test("expired: only a request queued behind another scan carries a deadline; a lane's first request is always scanned", async () => {
+  // Measured (17 Nov, scratch 200k vectors): a cold worker took ~2.5 s to boot and load sqlite-vec, so a deadline on the
+  // first request expired it unscanned — the slow repo's padding was never memoized.
+  const { c, spawned } = client(() => {
+    /* never answers: every request stays in flight */
+  });
+  void c.search("r", "first-on-lane-1", 5, 1_000);
+  void c.search("r", "first-on-lane-2", 5, 1_000);
+  void c.search("r", "queued", 5, 1_000);
+  const searches = spawned.flatMap((w) => w.posted.filter((r): r is SearchReq => r.kind === "search"));
+  const byText = new Map(searches.map((r) => [r.text, r.deadline]));
+  assert.equal(byText.get("first-on-lane-1"), undefined);
+  assert.equal(byText.get("first-on-lane-2"), undefined);
+  const d = byText.get("queued");
+  assert.ok(typeof d === "number" && Math.abs(d - (Date.now() + 1_000)) < 1_000, `the queued one carries its deadline (${String(d)})`);
+  await c.dispose();
+});
+
 // The served deployment runs dist/bundle/index.js (MCP-ISSUE-124), whose `new URL("./vectorSearchWorker.js",
 // import.meta.url)` resolves inside dist/bundle/. Spawn the bundled worker for real on a scratch DB built by the store.
 const BUNDLE = fileURLToPath(new URL("../../dist/bundle/", import.meta.url));

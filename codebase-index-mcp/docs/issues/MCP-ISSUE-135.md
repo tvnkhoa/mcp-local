@@ -83,6 +83,40 @@ only, not by time (not measured in this row): `find_impact_files` (a 216 s case 
 `search_regex` / `search_literals` (capped by limit and per-file caps). Any of them on a large repo can block the server
 thread for as long as its statement runs. Candidate: move the heaviest behind the same runner once one is measured.
 
+### Follow-up: the vector-search worker's timed-out scan (17 Nov, row 4, branch `wt/knn-cancel`)
+
+The KNN behind `search_symbols` padding (MCP-ISSUE-132/136) stays in a worker thread: it is not caller-written SQL,
+and the memo makes a late answer useful. A scan still cannot be interrupted. Each widening round of `knnDeterministic`
+is one synchronous vec0 statement, and the scan runs up to 4 of them. The client bounds what it can:
+
+- **Queued requests expire.** A request queued behind another scan on its lane carries `deadline` (post time +
+  budget). The worker answers `expired` without scanning when that deadline has passed (`createSearchHandler`). The
+  caller already got `budget`, and nothing is memoized. A lane's first request carries no deadline. A cold worker
+  needed ~2.5 s to boot and load sqlite-vec on this machine, and a deadline there dropped the first scan of a slow
+  repo every time, so its padding was never memoized (found while measuring this fix).
+- **Lane cap.** A lane whose request in hand runs past `DEFAULT_LANE_CAP_MS` (10 s, ~2x the slowest scan measured) is
+  retired. It is dropped from the lanes at once, its waiters settle `worker-error` and leave `MAX_PENDING`, the next
+  search spawns a fresh worker, and the worker is terminated. Termination takes effect when the statement in hand
+  returns, so the rest of the scan and the lane's queue never run.
+- **Memo copies** (row 1 review). A memo hit returns a fresh copy, and the memo holds a frozen copy. Before this, a
+  caller that edited the rows it got changed every later answer.
+
+Measured on a scratch DB (200 000 vectors in one repo partition, 50 in another; dist/ built at this branch's base for
+"before", 2 runs each; `measure-knn.mjs`, raw log in the row's evidence). One cold lookup took 1.1-5.0 s. Scenario:
+budget 500 ms. A big-repo search times out on lane 1. A second big search takes lane 2, and a small-repo search queues
+on lane 1.
+
+| | before | after (cap 10 s) | after (cap 1.5 s) |
+|---|---|---|---|
+| queued small search after its caller gave up | scanned anyway (590-637 ms) | `expired`, not scanned | settled at the cap |
+| both lanes free at | 5 330-5 911 ms | 5 376-6 240 ms (started scans finish, memoized) | 2 038-2 050 ms (2 lanes retired) |
+| worker threads exit | when disposed, after their scans | same | 33-591 ms after retire (end of the statement in hand) |
+
+With the 10 s default, a started scan of a few seconds still runs to its end: that is deliberate, because its answer is
+memoized for the next identical query. The cap stops a pathological scan. Unit tests: `vectorSearchWorkerClient.test.ts`
+(lane cap retires and terminates; the cap bounds one scan, not a lane's queue; expired is not memoized; only a queued
+request carries a deadline; memo copies).
+
 - **Workaround used (before the fix):** no `query_graph` on the live server; the question was answered from scratch DBs
   indexed by a private server process.
 - **Enhancement proposal:** done (the runner). Follow-up: measure the fixed-shape paths above on wec.be and move any

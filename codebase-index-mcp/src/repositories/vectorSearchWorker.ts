@@ -19,22 +19,30 @@ import Database from "better-sqlite3";
 import { initVectorStore, invalidateVectorSearchCache, vectorSearchSymbols } from "./vectorStore.js";
 
 export type VectorSearchRequest =
-  | { kind: "search"; id: number; dbPath: string; repoId: string; text: string; k: number }
+  /** `deadline` (epoch ms): the caller stops waiting then; a request still queued at that time is not scanned. */
+  | { kind: "search"; id: number; dbPath: string; repoId: string; text: string; k: number; deadline?: number }
   | { kind: "invalidate"; id: number }
   | { kind: "exit"; id: number };
 
 export type VectorSearchMessage =
   | { kind: "result"; id: number; rows: { symbolId: string; distance: number }[]; ms: number }
-  | { kind: "error"; id: number; message: string };
+  | { kind: "error"; id: number; message: string }
+  /** MCP-ISSUE-135: the request waited in this worker's queue past its deadline and was dropped unscanned. */
+  | { kind: "expired"; id: number };
 
 /**
  * The worker's request handling, with its two side effects injectable for tests. A connection whose sqlite-vec failed
  * to load is an ERROR for every search (review, 16 Nov): vectorStore.ts would fall back to its in-memory map, which is
  * empty in this thread, and answer `rows: []` as a success — the padding would vanish without a word.
+ *
+ * MCP-ISSUE-135: a request whose caller already gave up (its `deadline` passed while it queued behind another scan)
+ * is answered `expired` without scanning. A scan in progress cannot be interrupted (better-sqlite3 has no interrupt and
+ * the KNN is one synchronous statement per widening round); the client bounds that one by retiring the lane.
  */
 export function createSearchHandler(deps: {
   open: (dbPath: string) => Database.Database;
   loadVec: (db: Database.Database) => boolean;
+  now?: () => number;
 }): { answer: (req: Extract<VectorSearchRequest, { kind: "search" }>) => VectorSearchMessage; close: () => void } {
   let db: Database.Database | null = null;
   let openPath = "";
@@ -49,6 +57,7 @@ export function createSearchHandler(deps: {
   };
   return {
     answer: (req) => {
+      if (req.deadline !== undefined && (deps.now ?? Date.now)() >= req.deadline) return { kind: "expired", id: req.id };
       const t0 = performance.now();
       try {
         const conn = connection(req.dbPath);
