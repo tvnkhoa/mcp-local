@@ -251,8 +251,20 @@ function isRunMarkerName(prefix: string, name: string): boolean {
 }
 
 function markerNamesOtherRepo(file: string, repoId: string): boolean {
+  let text: string | null;
   try {
-    const m = JSON.parse(fs.readFileSync(file, "utf8")) as { repoId?: unknown };
+    text = fs.readFileSync(file, "utf8");
+  } catch {
+    text = null;
+  }
+  return textNamesOtherRepo(text, repoId);
+}
+
+/** {@link markerNamesOtherRepo} on text already read (`null`: unreadable): unreadable or unparsable is not another repo's. */
+function textNamesOtherRepo(text: string | null, repoId: string): boolean {
+  if (text === null) return false;
+  try {
+    const m = JSON.parse(text) as { repoId?: unknown };
     return typeof m.repoId === "string" && m.repoId !== repoId;
   } catch {
     return false;
@@ -391,7 +403,57 @@ function bumpRepairAttempts(lockDir: string, repoId: string): void {
 }
 
 export function readRepairNeeded(lockDir: string, repoId: string): RepairNeeded | null {
-  const flags = repairNames(lockDir, "repair", repoId);
+  let names: string[];
+  try {
+    names = fs.readdirSync(lockDir);
+  } catch {
+    names = [];
+  }
+  const read = (n: string): string | null => {
+    try {
+      return fs.readFileSync(path.join(lockDir, n), "utf8");
+    } catch {
+      return null;
+    }
+  };
+  return judgeRepairFlags(repoId, names, read);
+}
+
+/**
+ * {@link readRepairNeeded} with the state dir read on the libuv threadpool (MCP-ISSUE-134 follow-up): the freshness gate
+ * runs it on every read tool call that misses its check cache. One readdir serves both kinds, each file is read once and
+ * the reads run in parallel. Same answer as the sync reader.
+ */
+export async function readRepairNeededAsync(lockDir: string, repoId: string): Promise<RepairNeeded | null> {
+  let names: string[];
+  try {
+    names = await fs.promises.readdir(lockDir);
+  } catch {
+    return null;
+  }
+  const wanted = names.filter((n) => isRepairName(repairPrefix("repair", repoId), n) || isRepairName(repairPrefix("repairtry", repoId), n));
+  if (!wanted.some((n) => isRepairName(repairPrefix("repair", repoId), n))) return null;
+  const texts = await Promise.all(wanted.map((n) => fs.promises.readFile(path.join(lockDir, n), "utf8").catch(() => null)));
+  const byName = new Map(wanted.map((n, i) => [n, texts[i] ?? null]));
+  return judgeRepairFlags(repoId, wanted, (n) => byName.get(n) ?? null);
+}
+
+/**
+ * The repair verdict from the state dir's names and each file's text (`null`: unreadable or gone), shared by the sync
+ * and async readers. A file naming another repoId is not this repo's (`repairPrefix` sanitizes, so two ids can share a
+ * prefix); an unreadable or half-written flag reads as a full repair, the safe reading.
+ */
+function judgeRepairFlags(repoId: string, names: readonly string[], read: (name: string) => string | null): RepairNeeded | null {
+  const texts = new Map<string, string | null>();
+  const textOf = (n: string): string | null => {
+    if (!texts.has(n)) texts.set(n, read(n));
+    return texts.get(n) ?? null;
+  };
+  const ofThisRepo = (kind: "repair" | "repairtry"): string[] => {
+    const prefix = repairPrefix(kind, repoId);
+    return names.filter((n) => isRepairName(prefix, n) && !textNamesOtherRepo(textOf(n), repoId));
+  };
+  const flags = ofThisRepo("repair");
   if (flags.length === 0) return null;
   let mode: IndexMode = "dirty";
   let pid = 0;
@@ -399,7 +461,7 @@ export function readRepairNeeded(lockDir: string, repoId: string): RepairNeeded 
   for (const name of flags) {
     let m: { mode?: unknown; pid?: unknown; at?: unknown } = {};
     try {
-      m = JSON.parse(fs.readFileSync(path.join(lockDir, name), "utf8")) as typeof m;
+      m = JSON.parse(textOf(name) ?? "") as typeof m;
     } catch {
       m = { mode: "full" }; // unreadable or half-written: the safe reading is a full repair
     }
@@ -408,7 +470,7 @@ export function readRepairNeeded(lockDir: string, repoId: string): RepairNeeded 
     if (typeof m.pid === "number") pid = m.pid;
     if (typeof m.at === "number" && m.at >= at) at = m.at;
   }
-  return { mode, pid, at, attempts: repairNames(lockDir, "repairtry", repoId).length, flags };
+  return { mode, pid, at, attempts: ofThisRepo("repairtry").length, flags };
 }
 
 /** Clear the given flags (those a repair started with) and, once none is left, the attempt count. */
@@ -1150,7 +1212,7 @@ export function createFreshnessGate(opts: FreshnessGateOptions): FreshnessGate {
     }
 
     // F4: a run that died mid-way (see RepairNeeded) leaves the index part-written whatever HEAD and the tree say.
-    const repair = readRepairNeeded(opts.lockDir, repoId);
+    const repair = await readRepairNeededAsync(opts.lockDir, repoId); // MCP-ISSUE-134 follow-up: off the server thread
     if (repair && (repair.attempts ?? 0) >= MAX_REPAIR_ATTEMPTS) {
       // The repair was started this many times and each was killed or failed: another run would only repeat it.
       return {

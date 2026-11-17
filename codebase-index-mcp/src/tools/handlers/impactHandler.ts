@@ -14,7 +14,7 @@ import { notFound } from "@mcp/core";
 import fs from "node:fs";
 import { fileIndexedNote } from "../../middleware/inputGuards.js";
 import { validateReadOnlyGraphSql, validateAllowedTables, QUERY_GRAPH_TABLE_SCOPES, QueryGraphScopeError } from "../../middleware/sqliteGuardrails.js";
-import { buildStaleWarning, findWorktreeOwner, getRepoStaleness, collectDirtyFiles, countCommitsBehind } from "../../services/git/gitHelpers.js";
+import { buildStaleWarning, findWorktreeOwner, getRepoStalenessAsync, readWorkingTreeStateAsync, countCommitsBehindAsync } from "../../services/git/gitHelpers.js";
 import type { StaleWarning } from "../../services/git/gitHelpers.js";
 import { buildCoverageBlock, summarizeEdgeProvenance } from "../../middleware/coverage.js";
 import { isTestPath } from "../../services/indexing/fileFilter.js";
@@ -696,9 +696,9 @@ export async function handleFindImpactFiles(
         callerCount: callers.filter((x) => files.includes(x.callerFile)).length,
         topFiles: files.slice(0, 5)
       }));
-      return ctx.asText({ repoId: args.repoId, filePath: args.filePath, groupBy: "module", totalCallers: callers.length, moduleGroups, graphHealth: result.graphHealth, reliabilitySummary: result.reliabilitySummary, ...surfaceWiring, indexMeta: buildIndexMeta(store, args.repoId, true), ...warn }, profile);
+      return ctx.asText({ repoId: args.repoId, filePath: args.filePath, groupBy: "module", totalCallers: callers.length, moduleGroups, graphHealth: result.graphHealth, reliabilitySummary: result.reliabilitySummary, ...surfaceWiring, indexMeta: await buildIndexMetaWithFreshness(store, args.repoId), ...warn }, profile);
     }
-    return ctx.asText({ repoId: args.repoId, filePath: args.filePath, ...result, callers, indexMeta: buildIndexMeta(store, args.repoId, true), ...warn }, profile);
+    return ctx.asText({ repoId: args.repoId, filePath: args.filePath, ...result, callers, indexMeta: await buildIndexMetaWithFreshness(store, args.repoId), ...warn }, profile);
   }
   // MCP-ISSUE-056: same filter as the surface view, and likewise in-query so it applies before the cap.
   const result = store.getImpactFiles(args.repoId, args.filePath, args.limit, args.excludeTests);
@@ -710,7 +710,7 @@ export async function handleFindImpactFiles(
     if (profile === "nano") {
       return ctx.asText({ repoId: args.repoId, filePath: args.filePath, totalModules: moduleGroups.length, topModules: moduleGroups.slice(0, 5), hasMore: moduleGroups.length > 5, ...filesWiring, ...warn }, profile);
     }
-    return ctx.asText({ repoId: args.repoId, filePath: args.filePath, moduleGroups, graphHealth: result.graphHealth, reliabilitySummary: result.reliabilitySummary, ...filesWiring, indexMeta: buildIndexMeta(store, args.repoId, true), ...warn }, profile);
+    return ctx.asText({ repoId: args.repoId, filePath: args.filePath, moduleGroups, graphHealth: result.graphHealth, reliabilitySummary: result.reliabilitySummary, ...filesWiring, indexMeta: await buildIndexMetaWithFreshness(store, args.repoId), ...warn }, profile);
   }
   if (profile === "nano") {
     const topFiles = result.impactedFiles.slice(0, 10).map((f) => ({ filePath: f.filePath, symbolCount: (f as { symbolCount?: number }).symbolCount ?? null }));
@@ -718,7 +718,7 @@ export async function handleFindImpactFiles(
     // otherwise a blast radius of 300 shown 10 at a time reported `totalFiles: 20`.
     return ctx.asText({ repoId: args.repoId, filePath: args.filePath, totalFiles: result.totalImpactedCount, topFiles, hasMore: result.totalImpactedCount > topFiles.length, ...filesWiring, ...warn }, profile);
   }
-  return ctx.asText({ repoId: args.repoId, filePath: args.filePath, ...result, indexMeta: buildIndexMeta(store, args.repoId, true), ...warn }, profile);
+  return ctx.asText({ repoId: args.repoId, filePath: args.filePath, ...result, indexMeta: await buildIndexMetaWithFreshness(store, args.repoId), ...warn }, profile);
 }
 
 // ── get_change_context ────────────────────────────────────────────────────────
@@ -846,51 +846,56 @@ const DIRTY_FILES_CAP = 20;
 
 /**
  * Index provenance for graph-read responses: branch/commitSha/indexedAt. Pure DB read —
- * deterministic, no git subprocess. `withFreshness:true` (ENH-A) additionally probes the
- * git working tree for `indexLag`/`dirtyFiles` so the agent knows which results to distrust
- * mid-edit; both are omitted when the tree is clean and HEAD matches the indexed commit.
- *
- * Freshness is git-derived and therefore NON-deterministic, so it is attached ONLY by
- * edit-verification tools (find_impact_files, change_impact) — never by the navigation
- * tools the token benchmark snapshots (file/folder summary, context pack), which must stay
- * deterministic and lean. Attach per-handler only — NOT in asText (cost; repo-less tools).
+ * deterministic, no git subprocess, no file read. {@link buildIndexMetaWithFreshness} (ENH-A)
+ * additionally probes the git working tree for `indexLag`/`dirtyFiles`.
  */
-export function buildIndexMeta(store: GraphStore, repoId: string, withFreshness = false): IndexMeta | null {
+export function buildIndexMeta(store: GraphStore, repoId: string): IndexMeta | null {
   const latestRun = store.getLatestRun(repoId);
   if (!latestRun) return null;
-
-  const meta: IndexMeta = {
+  return {
     branch: latestRun.branch,
     commitSha: latestRun.commitSha,
     indexedAt: latestRun.finishedAt
   };
+}
 
-  if (withFreshness) {
-    const repo = store.getRepository(repoId);
-    if (repo) {
-      let dirtyCount = 0;
-      try {
-        const dirty = collectDirtyFiles(repo.repoPath);
-        dirtyCount = dirty.size;
-        if (dirtyCount > 0) {
-          meta.dirtyFiles = [...dirty].slice(0, DIRTY_FILES_CAP);
-        }
-      } catch {
-        // non-git repo / git error — leave dirty info off
-      }
-      const staleness = getRepoStaleness(repoId, store);
-      const commitsBehind = staleness.isStale
-        ? countCommitsBehind(repo.repoPath, latestRun.commitSha) ?? undefined
-        : undefined;
-      // Surface indexLag whenever the tree is dirty OR the index is stale — gate on isStale,
-      // not on commitsBehind, which is falsy-zero for a diverged/rewound HEAD and would
-      // otherwise drop the staleness signal on a clean tree.
-      if (dirtyCount > 0 || staleness.isStale) {
-        meta.indexLag = { dirtyCount, ...(commitsBehind !== undefined ? { commitsBehind } : {}) };
-      }
-    }
+/**
+ * {@link buildIndexMeta} plus working-tree freshness (ENH-A): `indexLag`/`dirtyFiles` so the agent knows
+ * which results to distrust mid-edit; both are omitted when the tree is clean and HEAD matches the indexed commit.
+ *
+ * Freshness is git-derived and therefore NON-deterministic, so it is attached ONLY by
+ * edit-verification tools (find_impact_files) — never by the navigation tools the token benchmark
+ * snapshots (file/folder summary, context pack), which must stay deterministic and lean. Attach
+ * per-handler only — NOT in asText (cost; repo-less tools).
+ *
+ * MCP-ISSUE-134 follow-up: every git read here is off the server thread — `git status`, the HEAD files
+ * and `git rev-list` were sync on every find_impact_files call. Status and HEAD are read concurrently;
+ * same answers as the sync reads (`collectDirtyFiles`, `getRepoStaleness`, `countCommitsBehind`).
+ */
+export async function buildIndexMetaWithFreshness(store: GraphStore, repoId: string): Promise<IndexMeta | null> {
+  const meta = buildIndexMeta(store, repoId);
+  if (!meta) return null;
+  const repo = store.getRepository(repoId);
+  if (!repo) return meta;
+
+  const [dirty, staleness] = await Promise.all([
+    // collectDirtyFiles' rule: a non-git repo / git error is an empty set, never an error.
+    readWorkingTreeStateAsync(repo.repoPath).then((t) => new Set(t.dirty), () => new Set<string>()),
+    getRepoStalenessAsync(repoId, store)
+  ]);
+  const dirtyCount = dirty.size;
+  if (dirtyCount > 0) {
+    meta.dirtyFiles = [...dirty].slice(0, DIRTY_FILES_CAP);
   }
-
+  const commitsBehind = staleness.isStale
+    ? (await countCommitsBehindAsync(repo.repoPath, meta.commitSha)) ?? undefined
+    : undefined;
+  // Surface indexLag whenever the tree is dirty OR the index is stale — gate on isStale,
+  // not on commitsBehind, which is falsy-zero for a diverged/rewound HEAD and would
+  // otherwise drop the staleness signal on a clean tree.
+  if (dirtyCount > 0 || staleness.isStale) {
+    meta.indexLag = { dirtyCount, ...(commitsBehind !== undefined ? { commitsBehind } : {}) };
+  }
   return meta;
 }
 

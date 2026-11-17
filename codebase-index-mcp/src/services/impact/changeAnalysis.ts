@@ -7,7 +7,7 @@
  * or test-linking/residual-risk (change_impact) on top of this common core.
  */
 import type { GraphStore } from "../../repositories/graphStore.js";
-import { parseNameStatusZ, parseStatusPorcelainV2Entries, resolveHeadCommitSha, runGit, runGitLines } from "../git/gitHelpers.js";
+import { gitAsync, parseNameStatusZ, parseStatusPorcelainV2Entries, resolveHeadCommitSha, resolveHeadCommitShaAsync, runGit, runGitLines } from "../git/gitHelpers.js";
 import { scoreChangeRisk } from "../analysis/policyResolver.js";
 import type { ReliabilitySummary } from "../../types/index.js";
 
@@ -107,65 +107,104 @@ export class ChangeAnalysisError extends Error {
   }
 }
 
+type ChangeAnalysisArgs = {
+  repoId: string;
+  repoPath: string;
+  baseRef?: string;
+  headRef: string;
+  includeUntracked: boolean;
+  maxFiles: number;
+  impactLimit: number;
+  indexedCommitSha: string | null;
+};
+
+/** What git says changed, before scoring: the shared middle of the sync and async readers. */
+type ChangeSet = { baseRef: string | null | undefined; changed: ChangedPath[]; note: string };
+
+const STATUS_ARGS = ["-c", "core.quotePath=false", "status", "--porcelain=v2", "-z", "--untracked-files=all"];
+const rangeDiffArgs = (baseRef: string, headRef: string): string[] => ["-c", "core.quotePath=false", "diff", "--name-status", "-z", "-M", `${baseRef}..${headRef}`];
+const UNTRACKED_ARGS = ["ls-files", "--others", "--exclude-standard"];
+const WORKING_TREE_NOTE_WITH_BASE = "using working-tree diff (no new commits since last index; showing staged + unstaged changes)";
+const WORKING_TREE_NOTE_NO_BASE = "baseRef unavailable; using working-tree diff against HEAD";
+
+function badRef(baseRef: string | null | undefined, headRef: string): ChangeAnalysisError {
+  // MCP-ISSUE-060: the one case with no legitimate reading of `[]`. A ref the caller typed either
+  // resolves or it does not; answering "0 files changed, 0 high risk" for a ref that does not exist
+  // is the worst possible output from a release gate.
+  return new ChangeAnalysisError(
+    "UNRESOLVED_REF",
+    `git could not diff '${String(baseRef)}..${headRef}' in this repository. Check that both refs exist locally (git fetch may be needed) and are spelled correctly.`
+  );
+}
+
 /**
  * Resolve the changed-file set (git range diff or working-tree diff) and score the static
  * blast radius of each changed file. Pure read: no writes, no index mutation.
+ *
+ * The tools call {@link computeChangedFileImpactsAsync}; this sync form is the same answer for callers off the
+ * server thread.
  */
-export function computeChangedFileImpacts(
-  store: GraphStore,
-  args: {
-    repoId: string;
-    repoPath: string;
-    baseRef?: string;
-    headRef: string;
-    includeUntracked: boolean;
-    maxFiles: number;
-    impactLimit: number;
-    indexedCommitSha: string | null;
-  }
-): ChangedFileImpactsResult {
-  const headRef = args.headRef;
+export function computeChangedFileImpacts(store: GraphStore, args: ChangeAnalysisArgs): ChangedFileImpactsResult {
   const baseRef = args.baseRef ?? args.indexedCommitSha;
   const headCommitSha = resolveHeadCommitSha(args.repoPath);
   const isWorkingTreeMode = !baseRef || (headCommitSha != null && baseRef === headCommitSha);
-
   // MCP-ISSUE-087 (release K2): status-carrying reads, so a rename reports BOTH paths. `--name-only`
   // printed only the new side, and the old path's importers — the files a move breaks — never appeared.
-  let changed: ChangedPath[];
-  let note: string;
   if (isWorkingTreeMode) {
     // The freshness gate's own read: staged, unstaged and (here, on request) untracked paths, both
     // sides of a staged rename. A plain `mv` is a deleted path plus an untracked one: git pairs nothing.
     let out = "";
     try {
-      out = runGit(args.repoPath, ["-c", "core.quotePath=false", "status", "--porcelain=v2", "-z", "--untracked-files=all"]);
+      out = runGit(args.repoPath, STATUS_ARGS);
     } catch {
       out = ""; // not a git repo, or an unborn HEAD: nothing changed, as before
     }
-    changed = changedPathsFromStatus(out, args.includeUntracked);
-    note = baseRef
-      ? "using working-tree diff (no new commits since last index; showing staged + unstaged changes)"
-      : "baseRef unavailable; using working-tree diff against HEAD";
-  } else {
-    // MCP-ISSUE-060: the one case with no legitimate reading of `[]`. A ref the caller typed either
-    // resolves or it does not; answering "0 files changed, 0 high risk" for a ref that does not exist
-    // is the worst possible output from a release gate.
-    let out: string;
-    try {
-      out = runGit(args.repoPath, ["-c", "core.quotePath=false", "diff", "--name-status", "-z", "-M", `${baseRef}..${headRef}`]);
-    } catch {
-      throw new ChangeAnalysisError(
-        "UNRESOLVED_REF",
-        `git could not diff '${String(baseRef)}..${headRef}' in this repository. Check that both refs exist locally (git fetch may be needed) and are spelled correctly.`
-      );
-    }
-    changed = changedPathsFromNameStatus(out);
-    if (args.includeUntracked) {
-      for (const p of runGitLines(args.repoPath, ["ls-files", "--others", "--exclude-standard"])) changed.push({ path: p, change: "added" });
-    }
-    note = "using git range diff";
+    return scoreChangeSet(store, args, { baseRef, changed: changedPathsFromStatus(out, args.includeUntracked), note: baseRef ? WORKING_TREE_NOTE_WITH_BASE : WORKING_TREE_NOTE_NO_BASE });
   }
+  let out: string;
+  try {
+    out = runGit(args.repoPath, rangeDiffArgs(baseRef, args.headRef));
+  } catch {
+    throw badRef(baseRef, args.headRef);
+  }
+  const changed = changedPathsFromNameStatus(out);
+  if (args.includeUntracked) {
+    for (const p of runGitLines(args.repoPath, UNTRACKED_ARGS)) changed.push({ path: p, change: "added" });
+  }
+  return scoreChangeSet(store, args, { baseRef, changed, note: "using git range diff" });
+}
 
+/**
+ * {@link computeChangedFileImpacts} with every git read off the server thread (MCP-ISSUE-134 follow-up): HEAD from the
+ * git files on the libuv threadpool, `git status` / `git diff` / `git ls-files` as async processes. `detect_changes` and
+ * `change_impact` ran all of them sync on each call. Same answers, same `ChangeAnalysisError` for a bad ref.
+ */
+export async function computeChangedFileImpactsAsync(store: GraphStore, args: ChangeAnalysisArgs): Promise<ChangedFileImpactsResult> {
+  const baseRef = args.baseRef ?? args.indexedCommitSha;
+  const headCommitSha = await resolveHeadCommitShaAsync(args.repoPath);
+  const isWorkingTreeMode = !baseRef || (headCommitSha != null && baseRef === headCommitSha);
+  if (isWorkingTreeMode) {
+    const r = await gitAsync(args.repoPath, STATUS_ARGS);
+    const out = r.status === 0 ? r.stdout : ""; // not a git repo, or an unborn HEAD: nothing changed
+    return scoreChangeSet(store, args, { baseRef, changed: changedPathsFromStatus(out, args.includeUntracked), note: baseRef ? WORKING_TREE_NOTE_WITH_BASE : WORKING_TREE_NOTE_NO_BASE });
+  }
+  const [diff, untracked] = await Promise.all([
+    gitAsync(args.repoPath, rangeDiffArgs(baseRef, args.headRef)),
+    args.includeUntracked ? gitAsync(args.repoPath, UNTRACKED_ARGS) : Promise.resolve(null)
+  ]);
+  if (diff.status !== 0) throw badRef(baseRef, args.headRef);
+  const changed = changedPathsFromNameStatus(diff.stdout);
+  if (untracked && untracked.status === 0) {
+    // runGitLines' split: trimmed, non-empty lines; a failed ls-files adds nothing.
+    for (const p of untracked.stdout.split(/\r?\n/).map((x) => x.trim()).filter((x) => x.length > 0)) changed.push({ path: p, change: "added" });
+  }
+  return scoreChangeSet(store, args, { baseRef, changed, note: "using git range diff" });
+}
+
+/** Dedupe, page and score a change set: the part both readers share, with no I/O but the store. */
+function scoreChangeSet(store: GraphStore, args: ChangeAnalysisArgs, set: ChangeSet): ChangedFileImpactsResult {
+  const { baseRef, changed, note } = set;
+  const headRef = args.headRef;
   const byPath = new Map<string, ChangedPath>();
   for (const c of changed) {
     const p = c.path.replace(/\\/g, "/").trim();

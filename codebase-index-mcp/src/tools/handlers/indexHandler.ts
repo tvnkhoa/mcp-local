@@ -11,7 +11,7 @@ import { findWorktreeOwner, getRepoStaleness } from "../../services/git/gitHelpe
 import { assertPathAllowed, clamp } from "../../middleware/indexGuardrails.js";
 import { resolveResponseProfile } from "../../middleware/responseFormatter.js";
 import { resolveDetectChangesPolicy } from "../../services/analysis/policyResolver.js";
-import { computeChangedFileImpacts } from "../../services/impact/changeAnalysis.js";
+import { computeChangedFileImpactsAsync } from "../../services/impact/changeAnalysis.js";
 import { buildCoverageBlock } from "../../middleware/coverage.js";
 import { buildIndexMeta } from "./impactHandler.js";
 import type { IndexMode } from "../../types/index.js";
@@ -41,9 +41,9 @@ function isNonTestableChangePath(filePath: string): boolean {
  * Matched by `name`, not `instanceof`: ADR 0001 records that identity checks across package
  * boundaries are unreliable in this workspace, and this guard is cheap enough to be robust anyway.
  */
-function asInvalidParamsOnBadRef<T>(run: () => T): T {
+async function asInvalidParamsOnBadRef<T>(run: () => Promise<T>): Promise<T> {
   try {
-    return run();
+    return await run();
   } catch (error) {
     if (error instanceof Error && error.name === "ChangeAnalysisError") {
       throw new McpError(ErrorCode.InvalidParams, error.message);
@@ -591,7 +591,7 @@ export async function handleWatchRepo(
 
 // ── detect_changes ────────────────────────────────────────────────────────────
 
-export function handleDetectChanges(
+export async function handleDetectChanges(
   args: {
     repoId: string;
     baseRef?: string;
@@ -608,7 +608,7 @@ export function handleDetectChanges(
     profile: string;
   },
   ctx: HandlerContext
-): CallToolResult {
+): Promise<CallToolResult> {
   const { store } = ctx;
   const profile = resolveResponseProfile(args.profile as Parameters<typeof resolveResponseProfile>[0]);
 
@@ -625,8 +625,8 @@ export function handleDetectChanges(
   const maxResults = args.maxResults ?? policyDefaults.maxResults;
   const sortBy = args.sortBy ?? policyDefaults.sortBy;
 
-  const core = asInvalidParamsOnBadRef(() =>
-    computeChangedFileImpacts(store, {
+  const core = await asInvalidParamsOnBadRef(() =>
+    computeChangedFileImpactsAsync(store, {
       repoId: args.repoId,
       repoPath: repo.repoPath,
       baseRef: args.baseRef,
@@ -756,7 +756,7 @@ function citationStatus(store: HandlerContext["store"], repoId: string, repoPath
 /** Citations listed per changed file in change_impact's `citationsTouched`. */
 const CHANGE_IMPACT_CITATIONS_PER_FILE = 20;
 
-export function handleChangeImpact(
+export async function handleChangeImpact(
   args: {
     repoId: string;
     baseRef?: string;
@@ -770,7 +770,7 @@ export function handleChangeImpact(
     profile: string;
   },
   ctx: HandlerContext
-): CallToolResult {
+): Promise<CallToolResult> {
   const { store } = ctx;
   const profile = resolveResponseProfile(args.profile as Parameters<typeof resolveResponseProfile>[0]);
 
@@ -780,7 +780,7 @@ export function handleChangeImpact(
   }
 
   const indexedCommitSha = store.getLatestRun(args.repoId)?.commitSha ?? null;
-  const core = asInvalidParamsOnBadRef(() => computeChangedFileImpacts(store, {
+  const core = await asInvalidParamsOnBadRef(() => computeChangedFileImpactsAsync(store, {
     repoId: args.repoId,
     repoPath: repo.repoPath,
     baseRef: args.baseRef,

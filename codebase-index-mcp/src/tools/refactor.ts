@@ -297,7 +297,7 @@ export function buildRefactorTools(deps: CodebaseIndexDeps): AnyToolDefinition[]
     },
     annotations: readsGraph,
     rawResult: true,
-    handler: (input) => ok(raw(handleChangeImpact(input, buildContext())))
+    handler: async (input) => ok(raw(await handleChangeImpact(input, buildContext())))
   });
 
   const getValueContractImpact = defineTool({

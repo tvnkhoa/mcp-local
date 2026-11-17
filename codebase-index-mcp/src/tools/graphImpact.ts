@@ -177,7 +177,7 @@ export function buildGraphImpactTools(deps: CodebaseIndexDeps): AnyToolDefinitio
     },
     annotations: readsGraph,
     rawResult: true,
-    handler: (input) => ok(raw(handleDetectChanges(input, buildContext())))
+    handler: async (input) => ok(raw(await handleDetectChanges(input, buildContext())))
   });
 
   const detectCircularDependencies = defineTool({
