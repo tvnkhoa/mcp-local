@@ -71,6 +71,26 @@
     `computeChangedFileImpacts` → `resolveHeadCommitSha` (changeAnalysis.ts:129).
   - Not per read: `runPolicy.ts` (mode decisions when a job starts) and `indexRunner` / `indexPipeline` (inside a run).
   - `readRepairNeeded` (a readdir per gate check, about 0.1 ms per read here) is still sync.
+- **Follow-up FIXED 2026-11-17 (row 3, branch `wt/head-reads`; the leader widened the scope to the two handlers'
+  callers, session 4ae1d27a):** every per-call read in the list above now runs off the server thread. Outputs are unchanged.
+  - `find_impact_files`: `buildIndexMeta` is now the pure DB read only. The new `buildIndexMetaWithFreshness` (impactHandler.ts)
+    reads `git status` (`readWorkingTreeStateAsync`) and HEAD (`getRepoStalenessAsync`) concurrently, then `git rev-list`
+    (`countCommitsBehindAsync`). It used to be four sync reads: `git status`, HEAD files, `rev-parse` fallback and `rev-list`.
+  - The `repo://{repoId}/context` resource: `readRepoResource` is async and uses `getRepoStalenessAsync`. The `risk`
+    resource (`buildRiskSnapshot`, not in the list above, same file) runs its `git diff --name-only HEAD` through `gitAsync`.
+  - `detect_changes` / `change_impact`: the new `computeChangedFileImpactsAsync` (changeAnalysis.ts) reads HEAD with
+    `resolveHeadCommitShaAsync` and runs `git status` / `git diff` / `git ls-files` through `gitAsync`. The diff and
+    ls-files run concurrently. Both readers share the scoring (`scoreChangeSet`). The sync `computeChangedFileImpacts`
+    stays for callers off the server thread. The handlers are async, and `asInvalidParamsOnBadRef` still maps an unresolvable
+    ref to InvalidParams.
+  - The freshness gate reads the repair flags with `readRepairNeededAsync` (freshness.ts). That is one async readdir for both
+    flag kinds, with each file read once and in parallel. The sync `readRepairNeeded` used two readdirs and read each flag twice.
+    Both share `judgeRepairFlags`.
+  - Tests: `src/middleware/freshnessRepair.test.ts` checks sync/async parity of the repair verdict over every state-dir shape.
+    `src/tools/handlers/headReadsAsync.test.ts` checks parity for indexMeta, the context resource and the change set, and that a
+    bad ref still maps to InvalidParams. Both files also carry a guard that spies on the sync fs and `child_process` builtins
+    (`syncBuiltinESMExports`) and asserts that the async readers make no sync call. The spy is shown to catch the sync readers.
+  - Still sync, deliberately: the gate's rare dead-marker sweep (as before), `runPolicy.ts` and the index run itself.
 - **Workaround used / fallback note:** the codebase-index MCP server did not connect in this session
   (`CONNECT_TIMEOUT` after 30 s), so discovery used baseline grep/Read on exact identifiers (`searchSymbolsImpl`,
   `readHeadShaFromFiles`, `liveRunMarkers`). This was logged here as the policy requires; it was not a tool defect.

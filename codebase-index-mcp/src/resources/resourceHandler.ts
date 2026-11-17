@@ -23,7 +23,7 @@ import { createResource, registerResource } from "@mcp/sdk";
 import type { GraphStore } from "../repositories/graphStore.js";
 import { normalizeResourcePayload } from "../middleware/responseFormatter.js";
 import { parseRepoResourceUri } from "./repoResourceUri.js";
-import { getRepoStaleness, runGitLines } from "../services/git/gitHelpers.js";
+import { getRepoStalenessAsync, gitAsync } from "../services/git/gitHelpers.js";
 import { resolveDetectChangesPolicy, scoreChangeRisk } from "../services/analysis/policyResolver.js";
 
 type ParsedRepoUri = NonNullable<ReturnType<typeof parseRepoResourceUri>>;
@@ -47,7 +47,7 @@ function listRepoResources(store: GraphStore): ResourceDescriptor[] {
   );
 }
 
-function readRepoResource(store: GraphStore, parsed: ParsedRepoUri, maxResultLimit: number): unknown {
+async function readRepoResource(store: GraphStore, parsed: ParsedRepoUri, maxResultLimit: number): Promise<unknown> {
   if (!store.getRepository(parsed.repoId)) {
     throw new McpError(
       ErrorCode.InvalidParams,
@@ -59,7 +59,8 @@ function readRepoResource(store: GraphStore, parsed: ParsedRepoUri, maxResultLim
     return {
       repo: store.getRepository(parsed.repoId),
       latestRun: store.getLatestRun(parsed.repoId),
-      staleness: getRepoStaleness(parsed.repoId, store)
+      // MCP-ISSUE-134 follow-up: HEAD read off the server thread, on every read (no cache).
+      staleness: await getRepoStalenessAsync(parsed.repoId, store)
     };
   }
   if (parsed.resource === "schema") {
@@ -69,7 +70,7 @@ function readRepoResource(store: GraphStore, parsed: ParsedRepoUri, maxResultLim
     const routes = store.getRouteMap(parsed.repoId, null, null, Math.min(parsed.limit ?? 200, maxResultLimit));
     return { repoId: parsed.repoId, count: routes.length, routes };
   }
-  return buildRiskSnapshot(store, parsed.repoId, "strict-review", Math.min(parsed.limit ?? 50, 100));
+  return await buildRiskSnapshot(store, parsed.repoId, "strict-review", Math.min(parsed.limit ?? 50, 100));
 }
 
 export function buildRepoResources(store: GraphStore, maxResultLimit: number): ResourceProvider {
@@ -96,12 +97,12 @@ export function buildRepoResources(store: GraphStore, maxResultLimit: number): R
   });
 }
 
-function buildRiskSnapshot(
+async function buildRiskSnapshot(
   store: GraphStore,
   repoId: string,
   policy: "quick-triage" | "strict-review" | "release-gate" | "custom",
   maxResults: number
-): {
+): Promise<{
   repoId: string;
   policy: string;
   changedFileCount: number;
@@ -109,7 +110,7 @@ function buildRiskSnapshot(
   mediumRiskCount: number;
   lowRiskCount: number;
   topRiskChanges: { filePath: string; riskScore: number; riskLevel: "high" | "medium" | "low" }[];
-} {
+}> {
   const repo = store.getRepository(repoId);
   if (!repo) {
     return {
@@ -124,7 +125,11 @@ function buildRiskSnapshot(
   }
 
   const defaults = resolveDetectChangesPolicy(policy);
-  const changedFiles = runGitLines(repo.repoPath, ["diff", "--name-only", "HEAD"]).map((x) => x.replace(/\\/g, "/")).slice(0, 100);
+  // MCP-ISSUE-134 follow-up: `git diff` as an async process, not on the server thread. runGitLines' answer: a failed
+  // git is `[]`, and the output is split into trimmed, non-empty lines.
+  const diff = await gitAsync(repo.repoPath, ["diff", "--name-only", "HEAD"]);
+  const diffLines = diff.status === 0 ? diff.stdout.split(/\r?\n/).map((x) => x.trim()).filter((x) => x.length > 0) : [];
+  const changedFiles = diffLines.map((x) => x.replace(/\\/g, "/")).slice(0, 100);
   const impacts = changedFiles.map((filePath) => {
     const impact = store.getImpactFiles(repoId, filePath, 20);
     // MCP-ISSUE-054: `totalImpactedCount`, not `impactedFiles.length`. This resource carried the same
