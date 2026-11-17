@@ -916,10 +916,12 @@ export function resolveCallEdgesBatch(
         to_id = b.new_to_id,
         confidence = b.confidence,
         reason = b.reason,
-        -- MCP-ISSUE-133 (row 5): an interface bind writes its receiver marker; every other row keeps its value
-        -- (the Python lanes' extraction hints live in this column).
+        -- MCP-ISSUE-133 (row 5): the column is written only to set a receiver marker or to clear a stale one.
+        -- Any other value is an extraction hint (the Python lanes' pyrecv: / pyargs: / pyobj) and is kept: a
+        -- Protocol-typed Python call binds an interface method too, and nulling it broke its untyped-receiver lane.
         assigned_expression = case
-          when b.reason in ('${INTERFACE_METHOD_REASON}', '${INTERFACE_METHOD_UNPROVEN_REASON}') then b.via
+          when b.via is not null then b.via
+          when edges.assigned_expression like '${IFACE_VIA_MARK}%' then null
           else edges.assigned_expression
         end
       from _resolve_batch b
@@ -1004,8 +1006,10 @@ export function rebuildInterfaceDispatchEdges(db: Database.Database, repoId: str
 /**
  * A CALLS edge into an interface method; `proven` is 1 when one of its rows is a proven-receiver bind. MCP-ISSUE-133
  * (row 5): `via` lists the receiver interfaces of rows that reached the method through a base interface
- * (comma-separated ids, null when none), and `plain` is 1 when some row did not — the declaring interface's whole
- * implementer set applies then.
+ * (comma-separated ids, null when none), and `plain` is 1 when some row carries no marker — the declaring interface's
+ * whole implementer set applies then. Both read the marker from ANY interface-bind row: `unifyInterfaceVia` gives the
+ * bare half of a call site (an unproven bind) its qualified half's marker, and this rebuild runs before the dedup that
+ * collapses the two, so testing the reason here made the bare row count as plain.
  */
 type InterfaceCall = {
   fromId: string;
@@ -1023,8 +1027,8 @@ function interfaceCalls(db: Database.Database, repoId: string): InterfaceCall[] 
     .prepare(
       `select e.from_id as fromId, s.symbol_id as methodId, s.name as name, s.parent_symbol_id as ifaceId, s.signature as signature,
               max(e.reason = ?) as proven,
-              group_concat(distinct case when e.reason = ? and e.assigned_expression like ? then substr(e.assigned_expression, ?) end) as via,
-              max(e.reason != ? or e.assigned_expression is null or e.assigned_expression not like ?) as plain
+              group_concat(distinct case when e.assigned_expression like ? then substr(e.assigned_expression, ?) end) as via,
+              max(e.assigned_expression is null or e.assigned_expression not like ?) as plain
        from edges e
        inner join symbols s on s.repo_id = e.repo_id and s.symbol_id = e.to_id
        inner join symbols i on i.repo_id = s.repo_id and i.symbol_id = s.parent_symbol_id and i.kind = 'interface'
@@ -1034,10 +1038,8 @@ function interfaceCalls(db: Database.Database, repoId: string): InterfaceCall[] 
     )
     .all(
       INTERFACE_METHOD_REASON,
-      INTERFACE_METHOD_REASON,
       `${IFACE_VIA_MARK}%`,
       IFACE_VIA_MARK.length + 1,
-      INTERFACE_METHOD_REASON,
       `${IFACE_VIA_MARK}%`,
       repoId,
       INTERFACE_METHOD_REASON,

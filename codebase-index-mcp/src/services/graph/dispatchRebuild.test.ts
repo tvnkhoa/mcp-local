@@ -3,7 +3,14 @@ import test from "node:test";
 import Database from "better-sqlite3";
 
 import { initGraphSchema, runGraphMigrations } from "../../repositories/schema.js";
-import { IFACE_VIA_MARK, rebuildInterfaceDispatchEdges, unifyInterfaceVia, type ResolvedUpdate } from "./edgeResolverCalls.js";
+import {
+  IFACE_VIA_MARK,
+  buildCallResolutionContext,
+  rebuildInterfaceDispatchEdges,
+  resolveCallEdgesBatch,
+  unifyInterfaceVia,
+  type ResolvedUpdate
+} from "./edgeResolverCalls.js";
 import { resolveBaseClassDispatch } from "./edgeResolverContracts.js";
 
 /**
@@ -230,4 +237,44 @@ test("MCP-ISSUE-133 (row 5): unifyInterfaceVia — one marker per (caller, targe
   const c = [u("g", "callee:ITenant.Add", "IPure.Add", proven, `${IFACE_VIA_MARK}t`), u("h", "callee:Add", "IPure.Add", unproven), u("g", "callee:X", "Y", "resolved callee by name")];
   unifyInterfaceVia(c);
   assert.deepEqual(c.map((x) => x.via), [`${IFACE_VIA_MARK}t`, undefined, undefined]);
+});
+
+test("MCP-ISSUE-133 (row 5 review): an interface bind keeps a Python hint in assigned_expression and clears only a stale marker", () => {
+  const conn = db();
+  // A Python Protocol-typed call: its row carries the extractor's hint, which the untyped-receiver lane reads.
+  sym(conn, "P", "Store", "interface", "store.py");
+  sym(conn, "P.save", "save", "method", "store.py", "P");
+  sym(conn, "py", "run", "function", "app.py");
+  // A C# call through the declaring interface, on a row holding a marker from an earlier resolution.
+  sym(conn, "I", "ITenant", "interface", "ITenant.cs", null, "public interface ITenant");
+  sym(conn, "I.Add", "Add", "method", "ITenant.cs", "I");
+  sym(conn, "cs", "Handle", "method", "H.cs");
+  const raw = conn.prepare(`insert into edges (repo_id, from_id, to_id, type, confidence, reason, assigned_expression) values ('r', ?, ?, 'CALLS', 0.75, 'qualified call', ?)`);
+  raw.run("py", "callee:Store.save", "pyargs:x");
+  raw.run("cs", "callee:ITenant.Add", `${IFACE_VIA_MARK}OLD`);
+
+  const ctx = buildCallResolutionContext(conn, "r");
+  while (ctx.offset < ctx.unresolvedRows.length) resolveCallEdgesBatch(conn, "r", ctx, 500);
+  const row = (from: string) =>
+    conn.prepare(`select to_id as t, reason, assigned_expression as a from edges where repo_id = 'r' and from_id = ? and type = 'CALLS'`).get(from) as { t: string; reason: string; a: string | null };
+  assert.deepEqual(row("py"), { t: "P.save", reason: "resolved interface method", a: "pyargs:x" }, "the Python hint survives the bind");
+  assert.deepEqual(row("cs"), { t: "I.Add", reason: "resolved interface method", a: null }, "a call through the declaring interface clears a stale marker");
+});
+
+test("MCP-ISSUE-133 (row 5 review): a TS qualified token on a derived interface binds the base interface's method", () => {
+  // The TS extractor emits no receiver-qualified token today (`s.read()` on `s: Store` gives `callee:read`), so this
+  // drives the resolver directly: the walk is language-agnostic for every non-Python file, TS included.
+  const conn = db();
+  sym(conn, "R", "Reader", "interface", "src/a/reader.ts", null, "interface Reader { read(): string; }");
+  sym(conn, "R.read", "read", "method", "src/a/reader.ts", "R");
+  sym(conn, "A", "Audit", "interface", "src/b/store.ts", null, "interface Audit { read(): string; }");
+  sym(conn, "A.read", "read", "method", "src/b/store.ts", "A");
+  sym(conn, "S", "Store", "interface", "src/b/store.ts", null, "interface Store extends Reader { save(): void; }");
+  sym(conn, "f", "f", "function", "src/c/svc.ts");
+  conn.prepare(`insert into edges (repo_id, from_id, to_id, type, confidence, reason) values ('r', 'f', 'callee:Store.read', 'CALLS', 0.75, 'qualified call')`).run();
+
+  const ctx = buildCallResolutionContext(conn, "r");
+  while (ctx.offset < ctx.unresolvedRows.length) resolveCallEdgesBatch(conn, "r", ctx, 500);
+  const row = conn.prepare(`select to_id as t, reason, assigned_expression as a from edges where repo_id = 'r' and from_id = 'f'`).get() as { t: string; reason: string; a: string };
+  assert.deepEqual(row, { t: "R.read", reason: "resolved interface method", a: `${IFACE_VIA_MARK}S` }, "Reader.read, never Audit.read from Store's file");
 });

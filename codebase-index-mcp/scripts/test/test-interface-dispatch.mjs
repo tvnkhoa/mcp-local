@@ -665,6 +665,73 @@ function runInheritedInterfaceMethod() {
   console.log("[ok] MCP-ISSUE-133 (row 5): a call on an inherited-only interface method binds the base interface's declaration");
 }
 
+// ── 9. MCP-ISSUE-133 (row 5 review): the BARE half of the call guesses the method the qualified half proved ──────
+
+// No decoy: the bare `callee:AddAsync` ties on name and sorts to IPureRepository.AddAsync (src/A first), so the call
+// site leaves two rows on that target — the proven qualified bind and an unproven bare one. Both must carry the
+// receiver marker: the dispatch rebuild runs BEFORE the dedup that collapses them, and a bare row read as a plain
+// bind took every IPureRepository implementer, sending the base-class fan-out into AudienceRepository's override.
+function runBareHalfSameTarget() {
+  const dbPath = createTempDbPath("ifd-bare-same");
+  const store = new GraphStore(dbPath);
+  const repoId = "ifd-bare-same";
+  store.ensureRepository(repoId, path.dirname(dbPath));
+
+  const files = [
+    indexFile(store, repoId, "src/A/IPureRepository.cs", `namespace App;
+public interface IPureRepository<T> where T : class { Task AddAsync(T entity); }
+`),
+    indexFile(store, repoId, "src/A/ITenantRepository.cs", `namespace App;
+public interface ITenantRepository : IPureRepository<Tenant> { Task<Tenant> FindAsync(int id); }
+`),
+    indexFile(store, repoId, "src/I/Repos.cs", `namespace App;
+public class PureRepository<T> : IPureRepository<T> where T : class { public virtual Task AddAsync(T entity) => Task.CompletedTask; }
+public class TenantRepository : PureRepository<Tenant>, ITenantRepository { public Task<Tenant> FindAsync(int id) => null; }
+`),
+    indexFile(store, repoId, "src/I/Audience.cs", `namespace App;
+public sealed class AudienceRepository : PureRepository<Audience> { public override Task AddAsync(Audience a) => Task.CompletedTask; }
+`)
+  ];
+  const caller = indexFile(store, repoId, "src/H/Handler.cs", `namespace App;
+public class CreateTenantHandler(ITenantRepository tenants) { public async Task Handle(Tenant t) { await tenants.AddAsync(t); } }
+`);
+  // indexRunner's order: IMPLEMENTS, EXTENDS, calls, interface dispatch, base-class dispatch, … then the dedup.
+  store.resolveImplementsEdges(repoId);
+  store.resolveExtendsEdges(repoId);
+  const ctx = store.buildCallResolutionContext(repoId);
+  while (store.resolveCallEdgesBatch(repoId, ctx, 5000) > 0) { /* drain */ }
+  store.rebuildInterfaceDispatchEdges(repoId);
+  store.resolveBaseClassDispatch(repoId);
+  store.deduplicateResolvedEdges(repoId);
+
+  const byId = new Map(files.flatMap((f) => f.symbols).map((s) => [s.symbolId, s]));
+  const label = (id) => {
+    const s = byId.get(id);
+    return s ? `${byId.get(s.parentSymbolId)?.name ?? "(none)"}.${s.name}` : id;
+  };
+  const handle = caller.symbols.find((s) => s.kind === "method" && s.name === "Handle");
+  const out = store.getCallEdges(repoId, handle.symbolId, "callees", 50).filter((e) => byId.has(e.toId));
+  const rows = out.map((e) => `${label(e.toId)}|${e.reason}`).sort();
+  assert.ok(
+    !rows.some((r) => r.startsWith("AudienceRepository.")),
+    `no fan-out into AudienceRepository's override from an ITenantRepository call (got ${JSON.stringify(rows)})`
+  );
+  assert.deepEqual(
+    [...new Set(out.filter((e) => e.reason === "interface-dispatch").map((e) => label(e.toId)))],
+    ["PureRepository.AddAsync"],
+    `dispatch reaches the inherited implementation (got ${JSON.stringify(rows)})`
+  );
+  assert.equal(
+    out.filter((e) => label(e.toId) === "IPureRepository.AddAsync").length,
+    1,
+    `the bare and qualified rows collapse into one edge (got ${JSON.stringify(rows)})`
+  );
+
+  store.close();
+  fs.rmSync(path.dirname(dbPath), { recursive: true });
+  console.log("[ok] MCP-ISSUE-133 (row 5 review): a bare half on the same target keeps the receiver scope through dedup");
+}
+
 try {
   runExtraction();
   runResolutionAndQuery();
@@ -673,6 +740,7 @@ try {
   runInheritedBaseMethod();
   runBaseClassAfterInheritedDispatch();
   runInheritedInterfaceMethod();
+  runBareHalfSameTarget();
   console.log("[ok] test-interface-dispatch passed");
 } catch (err) {
   console.error("test-interface-dispatch: FAILED:", err.message);

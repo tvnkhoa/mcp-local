@@ -165,3 +165,22 @@
   `interfaceSiblings.test.ts` covers `interfaceBaseNames` and `pickInterfaceMethod`; `dispatchRebuild.test.ts` covers
   `unifyInterfaceVia`; `runPolicy.test.ts` the v19 generation and the escalation from v18.
 - **Found on the way:** MCP-ISSUE-137 (base-class fan-out finds an override by the subclass's FILE).
+- **Review fixes (row 5 review, on top of the merge):**
+  - When the bare half of a call site guessed the SAME method its qualified half proved, the bare row (unproven)
+    carried the marker, but `interfaceCalls` read the marker only from proven rows and counted the bare row as plain.
+    The dispatch rebuild runs before the dedup that collapses the two rows, so the call took every implementer of the
+    base, and the base-class fan-out reached an override the receiver never runs. `via` and `plain` now read the marker
+    from any interface-bind row. `test:interface-dispatch` section 9 covers it: no decoy, the bare token ties onto
+    `IPureRepository.AddAsync`, the dedup runs. It is red at b50f5f2.
+  - The resolve UPDATE wrote `assigned_expression` for every interface-bind row, so a Protocol-typed Python call lost
+    its `pyargs:` / `pyrecv:` / `pyobj` hint. Now the column is written only to set a marker or to clear a stale one.
+    `dispatchRebuild.test.ts` covers this (red at b50f5f2).
+  - **TS / Java:** the walk runs for every non-Python file. The TS extractor emits no receiver-qualified token today
+    (`s.read()` on `s: Store` gives a bare `callee:read`), so the walk does not fire from TS extraction yet. A
+    resolver-level unit case drives it with a `.ts` qualified token: `Store extends Reader`, and the call binds
+    `Reader.read`, never `Audit.read` from `Store`'s file. There is no Java lane.
+- **Residual, not fixed:** base names are matched by simple name, generic arity and namespace dropped:
+  - `IRepo<T>` and a non-generic `IRepo` are one name.
+  - Two interfaces with one name in two namespaces are told apart only by the call lane's file tie-break (same file,
+    imported file, then path order).
+  - `interface IFoo : Other.Ns.IFoo` (a base with the interface's own simple name) is dropped as a self-reference.
