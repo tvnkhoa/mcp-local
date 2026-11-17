@@ -1320,7 +1320,9 @@ test("MCP-ISSUE-101 F4: a repair clears only the flags it started with; a run th
   try {
     fs.writeFileSync(path.join(h.lockDir, "running-r-999999-1.json"), JSON.stringify({ pid: 999999, at: 1, mode: "full", repoId: "r" }));
     const first = h.gate.ensureFresh("r"); // starts the repair run, which waits
-    await new Promise((resolve) => setTimeout(resolve, 50));
+    // wait for the repair run to have started (its flag snapshot is taken by then), not for wall time: under load 50 ms
+    // was not enough and the second flag landed before the snapshot, so it was cleared too (2 !== 1)
+    assert.equal(await settled(async () => h.runs.length, (n) => n === 1, 10_000), 1, "the repair run started");
     // another process's run dies while the repair works
     fs.writeFileSync(path.join(h.lockDir, "repair-r-424242-1700000000001-1.json"), JSON.stringify({ repoId: "r", mode: "full", pid: 424242, at: 2 }));
     h.finishRun();
