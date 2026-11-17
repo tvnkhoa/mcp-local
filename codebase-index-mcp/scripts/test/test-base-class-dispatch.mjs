@@ -92,7 +92,9 @@ const repoBase = indexFile(
 public abstract class RepoBase
 {
     public virtual void AddAsync(int x) { }
-    public void Save(int x) { AddAsync(x); }
+    public virtual void Put(int x) { }
+    public virtual void Put(int x, int y) { }
+    public void Save(int x) { AddAsync(x); Put(x); }
 }
 public abstract class OtherBase
 {
@@ -133,6 +135,28 @@ const partialOverride = indexFile(
 public partial class PartialRepo
 {
     public override void AddAsync(int x) { }
+}
+`
+);
+// Row 13 review: a namesake partial in a SIBLING folder is not another part of this type. `NsA/Handler` (no
+// override) extends RepoBase; `NsB/Handler` extends OtherBase and overrides AddAsync.
+indexFile("src/NsA/Handler.cs", `public partial class Handler : RepoBase { }`);
+const nsbHandler = indexFile(
+  "src/NsB/Handler.cs",
+  `
+public partial class Handler : OtherBase
+{
+    public override void AddAsync(int x) { }
+}
+`
+);
+// Row 13 review: an override of the OTHER overload. `Save` calls `Put(int)`; PutRepo overrides only `Put(int, int)`.
+const putRepo = indexFile(
+  "src/PutRepo.cs",
+  `
+public class PutRepo : RepoBase
+{
+    public override void Put(int x, int y) { }
 }
 `
 );
@@ -234,6 +258,19 @@ check(
   "MCP-ISSUE-137: a partial subclass's override in its other part's file is reached",
   dispatchedFromSave(partialAdd),
   partialAdd ? JSON.stringify(callersOf(partialAdd.symbolId)) : "symbol missing"
+);
+const nsbAdd = method(nsbHandler, "AddAsync");
+check(
+  "row 13 review: a namesake partial's override in a sibling folder (NsB/Handler : OtherBase) is NOT reached",
+  nsbAdd !== undefined && !dispatchedFromSave(nsbAdd),
+  nsbAdd ? JSON.stringify(callersOf(nsbAdd.symbolId)) : "symbol missing"
+);
+const putPair = method(putRepo, "Put");
+const putTargets = store.getCallEdges(repoId, saveCaller?.symbolId, "callees", 50).filter((e) => e.toName === "Put" || /Put/.test(e.toId));
+check(
+  "row 13 review: an override of Put(int, int) is NOT reached from a call on Put(int)",
+  putPair !== undefined && !dispatchedFromSave(putPair),
+  putPair ? `callers ${JSON.stringify(callersOf(putPair.symbolId))}; Save callees ${JSON.stringify(putTargets)}` : "symbol missing"
 );
 
 console.log(log.join("\n"));

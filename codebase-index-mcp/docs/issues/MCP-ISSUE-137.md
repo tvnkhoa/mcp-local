@@ -40,3 +40,17 @@
   28 files, past the cap of 10): the fix reaches `CampaignAssets`, `PortraitImageAsset` (in `CampaignAssets.cs`
   beside `MarketingImageAsset`) and `AdditionalDemographics` (beside `Demographic`), which the file key missed; three
   later files fall past the cap. No wrong-owner binding on this repo; the shape the fixture shows did not occur there.
+
+### Review fixes (row 13, same v20)
+
+- **Partial parts were keyed by (kind, name) repo-wide**, so `NsA/Handler : RepoBase` (partial, no override) took
+  `NsB/Handler : OtherBase`'s `AddAsync`, and the first part by path won over the real one. Another part now counts
+  only with the same enclosing type (`parent_symbol_id`), the same generic arity, and a file in the same directory
+  tree (one directory containing the other); the subclass's own override wins, else exactly one other part's, and two
+  candidate parts bind nothing.
+- **Overload by arity was a preference, not a rule**: with one candidate, `pickOwnedMethod` returned it whatever its
+  parameter count, so a call on `Put(int)` reached an override of `Put(int, int)`. Base-class dispatch now drops a
+  candidate whose parameter count is known and differs from the base method's.
+- A partial type repeating its base list in two parts takes one fan-out slot, not two.
+- **Red/green:** two more `test:base-class-dispatch` cases (sibling-folder namesake partial, other-overload override):
+  2 failing at 8657528, 0 after. wec.social-ads replay (same scratch index): 78 → 78 edges, no diff against 8657528.

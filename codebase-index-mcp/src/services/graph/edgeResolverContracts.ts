@@ -60,6 +60,24 @@ function isPartialDeclaration(signature: string | null): boolean {
   return head !== null && /\bpartial\b/.test(head[0]);
 }
 
+/** Row 13 review: the number of type parameters a type declaration names (`Repo<T>` 1, `Repo` 0). */
+function genericArity(signature: string | null, name: string): number {
+  if (!signature) return 0;
+  const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const m = new RegExp(`\\b${escaped}\\s*<([^>]*)>`).exec(signature.split(/[:{(]/)[0]);
+  return m ? m[1].split(",").length : 0;
+}
+
+/** Row 13 review: whether one file's directory contains the other's (same folder, or one nested in the other). */
+function sameDirectoryTree(a: string, b: string): boolean {
+  const dirs = (p: string) => p.replace(/\\/g, "/").split("/").slice(0, -1).filter((s) => s.length > 0).map((s) => s.toLowerCase());
+  const left = dirs(a);
+  const right = dirs(b);
+  const shorter = Math.min(left.length, right.length);
+  for (let i = 0; i < shorter; i++) if (left[i] !== right[i]) return false;
+  return true;
+}
+
 export function resolveBaseClassDispatch(db: Database.Database, repoId: string): number {
   // Capped like interface dispatch: past a point the edges are noise, and a base class with 200
   // subclasses would otherwise multiply every call on it.
@@ -103,7 +121,7 @@ export function resolveBaseClassDispatch(db: Database.Database, repoId: string):
       // and vary between runs (MCP-ISSUE-032).
       `
       select distinct e.to_id as baseId, e.from_id as typeId, s.file_path as filePath,
-             s.name as name, s.kind as kind, s.signature as signature
+             s.name as name, s.kind as kind, s.signature as signature, s.parent_symbol_id as parentSymbolId
       from edges e
       inner join symbols s on s.repo_id = e.repo_id and s.symbol_id = e.from_id
       where e.repo_id = ? and e.type = 'EXTENDS' and e.to_id not like 'base:%'
@@ -111,35 +129,59 @@ export function resolveBaseClassDispatch(db: Database.Database, repoId: string):
       order by e.to_id, s.file_path, e.from_id
       `
     )
-    .all(repoId) as (ClassBase & { typeId: string; name: string; kind: string; signature: string | null })[];
+    .all(repoId) as (ClassBase & { typeId: string; name: string; kind: string; signature: string | null; parentSymbolId: string | null })[];
 
   if (subclassRows.length === 0) return 0;
 
   // MCP-ISSUE-137: the fan-out walks subclass TYPES, not their files. A file holding several classes handed
   // every subclass in it the file's first same-named override — another class's method, or one of two real
   // overrides dropped. A C# `partial` subclass also owns the overrides its OTHER parts declare (the base list
-  // sits in one part, the override often in another file), so each part of the same name and kind is an owner.
-  const partialParts = new Map<string, ClassBase[]>();
+  // sits in one part, the override often in another file). The graph has no namespace, so "another part of
+  // this type" is proven only as far as it can be (row 13 review): same name, kind and generic arity, the same
+  // enclosing type (`parent_symbol_id`, null for a top-level type), and a file in the same directory tree as
+  // this part — one directory containing the other. A namesake in a sibling folder (`NsA/Handler.cs` vs
+  // `NsB/Handler.cs`) fails the last test; when two accepted parts both declare the override, nothing binds.
+  type PartialPart = ClassBase & { name: string; kind: string; signature: string; parentSymbolId: string | null };
+  const partialParts = new Map<string, PartialPart[]>();
   for (const p of db
     .prepare(
-      `select symbol_id as baseId, file_path as filePath, name, kind, signature from symbols
+      `select symbol_id as baseId, file_path as filePath, name, kind, signature, parent_symbol_id as parentSymbolId
+       from symbols
        where repo_id = ? and kind in ('class', 'struct', 'record', 'record struct') and signature like '%partial %'
        order by name, kind, file_path, symbol_id`
     )
-    .all(repoId) as (ClassBase & { name: string; kind: string; signature: string })[]) {
+    .all(repoId) as PartialPart[]) {
     if (!isPartialDeclaration(p.signature)) continue;
     const key = overrideKey(p.kind, p.name);
     const list = partialParts.get(key);
-    if (list) list.push({ baseId: p.baseId, filePath: p.filePath });
-    else partialParts.set(key, [{ baseId: p.baseId, filePath: p.filePath }]);
+    if (list) list.push(p);
+    else partialParts.set(key, [p]);
   }
+  const otherPartsOf = (r: (typeof subclassRows)[number]): ClassBase[] => {
+    if (!isPartialDeclaration(r.signature)) return [];
+    const typeArity = genericArity(r.signature, r.name);
+    return (partialParts.get(overrideKey(r.kind, r.name)) ?? [])
+      .filter(
+        (p) =>
+          p.baseId !== r.typeId &&
+          (p.parentSymbolId ?? null) === (r.parentSymbolId ?? null) &&
+          genericArity(p.signature, p.name) === typeArity &&
+          sameDirectoryTree(p.filePath, r.filePath)
+      )
+      .map((p) => ({ baseId: p.baseId, filePath: p.filePath }));
+  };
 
-  // Each subclass with the type declarations that own its members: itself, then its other partial parts.
-  const subclassOwnersByBaseId = new Map<string, ClassBase[][]>();
+  // Each subclass TYPE once per base, with the declarations that own its members: itself, then its other
+  // partial parts. A partial type that repeats its base list in two parts is one subclass, not two cap slots.
+  type SubclassOwners = { self: ClassBase; parts: ClassBase[] };
+  const subclassOwnersByBaseId = new Map<string, SubclassOwners[]>();
+  const seenTypes = new Set<string>();
   for (const r of subclassRows) {
-    const self: ClassBase = { baseId: r.typeId, filePath: r.filePath };
-    const parts = isPartialDeclaration(r.signature) ? partialParts.get(overrideKey(r.kind, r.name)) ?? [] : [];
-    const owners = [self, ...parts.filter((p) => p.baseId !== r.typeId)];
+    const parts = otherPartsOf(r);
+    const typeKey = overrideKey(r.baseId, [r.typeId, ...parts.map((p) => p.baseId)].sort().join(","));
+    if (seenTypes.has(typeKey)) continue;
+    seenTypes.add(typeKey);
+    const owners: SubclassOwners = { self: { baseId: r.typeId, filePath: r.filePath }, parts };
     const list = subclassOwnersByBaseId.get(r.baseId);
     if (list) list.push(owners);
     else subclassOwnersByBaseId.set(r.baseId, [owners]);
@@ -178,12 +220,30 @@ export function resolveBaseClassDispatch(db: Database.Database, repoId: string):
     else overridesByOwnerAndName.set(key, [row]);
   }
   if (overridesByOwnerAndName.size === 0) return 0;
+  // Row 13 review: a C# override has exactly its base method's parameter count, so a candidate whose count is
+  // known and differs overrides a DIFFERENT overload and is dropped; only an unreadable count falls back.
   const overrideOf = (owner: ClassBase, memberName: string, arity: number | null): string | undefined => {
     const candidates = [
       ...(overridesByOwnerAndName.get(overrideKey(owner.baseId, memberName)) ?? []),
       ...(overridesByOwnerAndName.get(overrideKey(`file:${owner.filePath}`, memberName)) ?? []),
-    ];
+    ].filter((c) => {
+      if (arity === null) return true;
+      const own = parameterCount(c.signature, memberName);
+      return own === null || own === arity;
+    });
     return candidates.length === 0 ? undefined : pickOwnedMethod(candidates, owner.baseId, owner.filePath, memberName, arity)?.symbolId;
+  };
+  // A subclass's own declaration wins; else the one other part that declares the override; two such parts
+  // are not proven to be this type, so nothing binds.
+  const subclassOverride = (owners: SubclassOwners, memberName: string, arity: number | null): string | undefined => {
+    const own = overrideOf(owners.self, memberName, arity);
+    if (own !== undefined) return own;
+    const found = new Set<string>();
+    for (const part of owners.parts) {
+      const id = overrideOf(part, memberName, arity);
+      if (id !== undefined) found.add(id);
+    }
+    return found.size === 1 ? [...found][0] : undefined;
   };
   const insertStmt = db.prepare(
     // A caller that already has a CALLS edge to the override keeps it (a direct resolution wins), so the result
@@ -223,14 +283,8 @@ export function resolveBaseClassDispatch(db: Database.Database, repoId: string):
       const overrideIds = new Set<string>();
       for (const b of bases) {
         for (const owners of (subclassOwnersByBaseId.get(b) ?? []).slice(0, MAX_SUBCLASS_DISPATCH_FANOUT)) {
-          // The first part that declares the override is the subclass's override; a partial type has one.
-          for (const owner of owners) {
-            const id = overrideOf(owner, call.memberName, arity);
-            if (id !== undefined) {
-              overrideIds.add(id);
-              break;
-            }
-          }
+          const id = subclassOverride(owners, call.memberName, arity);
+          if (id !== undefined) overrideIds.add(id);
         }
       }
       for (const overrideId of overrideIds) {
