@@ -144,6 +144,40 @@ test("lanes: a search posted while the worker scans another one is answered by a
   await c.dispose();
 });
 
+// MCP-ISSUE-136: the memo lives on the server thread, so a second lane's empty memo never costs a known query a rescan.
+test("memo: a known query never reaches a worker; a late answer is memoized; an answer older than invalidate() is not", async () => {
+  const held = new Map<string, () => void>();
+  const { c, spawned } = client((req, reply) => {
+    const send = () => reply({ kind: "result", id: req.id, rows: [{ symbolId: req.text, distance: 0.2 }], ms: 1 });
+    if (req.text.startsWith("hold")) held.set(req.text, send);
+    else setImmediate(send);
+  });
+  const searches = () => spawned.reduce((n, w) => n + w.posted.filter((r) => r.kind === "search").length, 0);
+  const keepAlive = setInterval(() => {}, 1_000);
+  assert.deepEqual(await c.search("r", "foo", 5, 1_000), { rows: [{ symbolId: "foo", distance: 0.2 }] });
+  assert.deepEqual(await c.search("r", "foo", 5, 1_000), { rows: [{ symbolId: "foo", distance: 0.2 }] });
+  assert.equal(searches(), 1, "the repeat is answered from the memo");
+  await c.search("r", "foo", 3, 1_000);
+  await c.search("other", "foo", 5, 1_000);
+  assert.equal(searches(), 3, "repo and k are part of the key");
+
+  assert.deepEqual(await c.search("r", "hold-late", 5, 20), { skipped: "budget" });
+  held.get("hold-late")!();
+  assert.deepEqual(await c.search("r", "hold-late", 5, 20), { rows: [{ symbolId: "hold-late", distance: 0.2 }] }, "the late answer was kept");
+  assert.equal(searches(), 4);
+
+  const stale = c.search("r", "hold-stale", 5, 1_000);
+  c.invalidate();
+  held.get("hold-stale")!();
+  assert.deepEqual(await stale, { rows: [{ symbolId: "hold-stale", distance: 0.2 }] }, "the waiter still gets its answer");
+  await c.search("r", "foo", 5, 1_000);
+  assert.equal(searches(), 6, "invalidate() cleared the memo (foo rescanned)");
+  void c.search("r", "hold-stale", 5, 1_000);
+  assert.equal(searches(), 7, "an answer to a request posted before invalidate() was not memoized");
+  clearInterval(keepAlive);
+  await c.dispose();
+});
+
 test("lanes: never more than MAX_WORKERS; past that a search queues on the least busy lane", async () => {
   const { c, spawned } = client(() => {
     /* never answers */

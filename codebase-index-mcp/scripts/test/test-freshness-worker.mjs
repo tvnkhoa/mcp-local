@@ -118,14 +118,14 @@ if (isMainThread) {
   t.unref();
 }
 `)}`;
-// MCP-ISSUE-136 negative control: FRESHNESS_WORKER_KNN_DELAY_MS=<ms> makes the vector-search worker's first `big` KNN
-// after each memo invalidation take that long (a run landing invalidates; CI's scan of `big` took ~2.9 s, e109539). With
+// MCP-ISSUE-136 negative control: FRESHNESS_WORKER_KNN_DELAY_MS=<ms> makes a vector-search worker's first `big` KNN
+// (a new worker's, and the first after each memo invalidation: both are real scans) take that long (a run landing invalidates; CI's scan of `big` took ~2.9 s, e109539). With
 // one serial worker, a `small` search posted behind that scan waited the whole 2 s padding budget; (a) caught it.
 const KNN_DELAY_MS = Number(process.env.FRESHNESS_WORKER_KNN_DELAY_MS ?? 0);
 const knnDelayPreload = `data:text/javascript,${encodeURIComponent(`
 import { isMainThread, parentPort } from "node:worker_threads";
 if (!isMainThread && parentPort) {
-  let armed = false;
+  let armed = true;
   const on = parentPort.on.bind(parentPort);
   parentPort.on = (event, fn) => event !== "message" ? on(event, fn) : on(event, (m) => {
     if (m && m.kind === "invalidate" && m.id === 0) armed = true;
