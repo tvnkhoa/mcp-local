@@ -359,10 +359,10 @@ export async function handleMigrationPreview(
   if (snapshotResult.status === "rejected") throw snapshotResult.reason;
   const preSnapshot = snapshotResult.value;
   const listing = listingResult.value;
-  const { entries, pending, applied } = listing;
+  const { entries, pending, applied, freshness } = listing;
 
   if (args.targetMigration !== undefined) {
-    return previewRevert(args.targetMigration, { env, profile, preSnapshotId: preSnapshot.snapshotId, pending, applied, entries }, config);
+    return previewRevert(args.targetMigration, { env, profile, preSnapshotId: preSnapshot.snapshotId, pending, applied, entries, freshness }, config);
   }
 
   if (pending.length === 0) {
@@ -421,7 +421,7 @@ export async function handleMigrationPreview(
  * forward migration. A down plan always needs `EF_REVERT` acknowledged, plus every high risk the
  * lint finds in the Down SQL — a Down that drops a table drops its data.
  */
-async function previewRevert(
+export async function previewRevert(
   target: string,
   ctx: {
     env: { name: string; connectionString: string };
@@ -430,6 +430,7 @@ async function previewRevert(
     pending: string[];
     applied: string[];
     entries: EfMigrationListEntry[];
+    freshness: AssemblyFreshness;
   },
   config: MigrationConfig
 ): Promise<CallToolResult> {
@@ -508,6 +509,8 @@ async function previewRevert(
       risks,
       requiredAcknowledgements,
       lockTimeout: describeLockTimeout(env.connectionString, config),
+      // A stale build refused in migration_preview; this is only ever the possibly_stale warning.
+      assembly: freshnessWarning(ctx.freshness),
       expiresAt,
       next: `Show the user what this reverts and why each code in requiredAcknowledgements matters. Only after an explicit yes: migration_apply with acknowledgeRisks: ${JSON.stringify(requiredAcknowledgements)}.`
     },

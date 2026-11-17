@@ -13,8 +13,9 @@ import process from "node:process";
 import { test } from "node:test";
 
 import { ConnectionManager } from "../../repositories/connectionManager.js";
+import { checkAssemblyFreshness } from "../../services/migration/assemblyFreshness.js";
 import { buildEfArgv, type EfResult, type MigrationConfig } from "../../services/migration/efRunner.js";
-import { handleMigrationAdd, handleMigrationDryRun, handleMigrationPreview, handleMigrationStatus, planEfDryRun } from "./migrationHandlers.js";
+import { handleMigrationAdd, handleMigrationDryRun, handleMigrationPreview, handleMigrationStatus, planEfDryRun, previewRevert } from "./migrationHandlers.js";
 
 process.env.POSTGRES_CONNECTION = "postgres://t:t@127.0.0.1:59999/t";
 delete process.env.POSTGRES_ALLOWED_ENVIRONMENTS;
@@ -236,4 +237,38 @@ test("branch switch (source newer, ids equal): status warns possibly_stale; dry 
   assert.equal(asm.status, "possibly_stale");
   // It gets past the freshness check and fails later, on the fake's missing script / the dead port.
   assert.notEqual(await codeOf(handleMigrationDryRun({}, connections(), config)), "MIGRATION_ASSEMBLY_STALE");
+});
+
+// ── revert preview carries the possibly_stale warning, as the forward preview does ──
+
+test("revert preview: a possibly_stale build warns (same shape as the forward preview); a fresh one has no assembly field", async (t) => {
+  const stale = staleFixture(t, LISTED, { sourceMs: NEW, dllMs: OLD });
+  const fresh = staleFixture(t, LISTED, { sourceMs: OLD, dllMs: NEW });
+  const entries = LISTED.map((id) => ({ id, name: id, safeName: id, applied: true }));
+  const revert = async (project: string) => {
+    const bin = path.join(path.dirname(path.dirname(project)), "bin");
+    const verbose = ["Using assembly 'Acme.Infra'.", `Using application base '${bin}'.`];
+    const f = fake(() => ok("SELECT 1;"));
+    const res = await previewRevert(
+      LISTED[0] as string,
+      {
+        env: { name: "dev", connectionString: "postgres://t:t@127.0.0.1:59999/t" },
+        profile: "compact",
+        preSnapshotId: "snap",
+        pending: [],
+        applied: LISTED,
+        entries,
+        freshness: checkAssemblyFreshness(project, [...LISTED], verbose)
+      },
+      f.config
+    );
+    return payload(res);
+  };
+  const warned = await revert(stale.config.project);
+  assert.equal(warned.direction, "down");
+  const asm = warned.assembly as { status: string; warning: string; remedy: string };
+  assert.equal(asm.status, "possibly_stale");
+  assert.match(asm.warning, /./);
+  assert.match(asm.remedy, /startup project/);
+  assert.equal((await revert(fresh.config.project)).assembly, undefined);
 });
