@@ -46,3 +46,12 @@
 - **Workaround used (baseline path):** none — the evidence came from instrumented harness runs, not from a fallback.
 - **Enhancement proposal:** an int8/bit-quantized vec0 column would cut the scan itself (a schema change; not needed for
   the server thread any more).
+- **CI bound tightening — not done (row 16, 17 Nov):** the plan was to tighten the CI bound to max(300 ms, 2 × the
+  observed max block) from the last green CI runs. The observed max is not in those logs: `scripts/run-tests.mjs` runs
+  each harness with `capture: true` and prints only `ok [31/70] test:index-lock-contention (<s>)` on a pass, so the
+  harness's `server A main-thread ticks late > 100 ms: …, max N ms` line appears only on a failure. Runs read:
+  44031150499 (main f345c46) 65.3 s, 44025347429 (wt/knn-cancel) 79.4 s, 44009694184 (wt/fresh-wait) 63.2 s,
+  43856178248 (main e1c9109) 72.4 s — duration only, no block value. With no measured value the "< 300 ms" test cannot
+  be passed, so the bound is unchanged: CI is still max(625 ms, 0.15 × baseline big run), a load-aware bound rather than a
+  constant. Next step: have the harness write its max block and bound to a file the CI job uploads (or print it past the
+  runner's capture), collect three green runs, then tighten.
