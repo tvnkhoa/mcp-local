@@ -22,6 +22,8 @@ export type VectorSearchRequest =
   /** `deadline` (epoch ms): the caller stops waiting then; a request still queued at that time is not scanned. */
   | { kind: "search"; id: number; dbPath: string; repoId: string; text: string; k: number; deadline?: number }
   | { kind: "invalidate"; id: number }
+  /** MCP-ISSUE-136: open the connection and load sqlite-vec now, so the lane's first search pays no start-up. No reply. */
+  | { kind: "warm"; id: number; dbPath: string }
   | { kind: "exit"; id: number };
 
 export type VectorSearchMessage =
@@ -43,7 +45,11 @@ export function createSearchHandler(deps: {
   open: (dbPath: string) => Database.Database;
   loadVec: (db: Database.Database) => boolean;
   now?: () => number;
-}): { answer: (req: Extract<VectorSearchRequest, { kind: "search" }>) => VectorSearchMessage; close: () => void } {
+}): {
+  answer: (req: Extract<VectorSearchRequest, { kind: "search" }>) => VectorSearchMessage;
+  warm: (dbPath: string) => void;
+  close: () => void;
+} {
   let db: Database.Database | null = null;
   let openPath = "";
   let vecLoaded = false;
@@ -66,6 +72,15 @@ export function createSearchHandler(deps: {
         return { kind: "result", id: req.id, rows, ms: Math.round(performance.now() - t0) };
       } catch (e) {
         return { kind: "error", id: req.id, message: e instanceof Error ? e.message : String(e) };
+      }
+    },
+    warm: (dbPath) => {
+      try {
+        connection(dbPath);
+      } catch {
+        // The lane's first search opens it again and reports the failure to its caller.
+        db = null;
+        openPath = "";
       }
     },
     close: () => {
@@ -94,6 +109,10 @@ parentPort?.on("message", (req: VectorSearchRequest) => {
     // The KNN memo lives in this thread's copy of vectorStore.ts; a run that landed through another connection
     // (the refresh worker) leaves it stale. The server thread posts this from `onRunLanded` / `onPurged`.
     invalidateVectorSearchCache();
+    return;
+  }
+  if (req.kind === "warm") {
+    handler.warm(req.dbPath);
     return;
   }
   parentPort?.postMessage(handler.answer(req));

@@ -17,15 +17,19 @@
  * - **Memo (MCP-ISSUE-136).** Answers are memoized HERE, on the server thread, keyed like vectorStore's own memo
  *   (repo, k, text) and bounded by {@link MEMO_MAX}: a memoized query never reaches a worker, whichever lane scanned
  *   it. `invalidate()` clears it, and an answer to a request posted before the last invalidation is not stored.
+ * - **Join.** A search for a query already in flight (same key, same generation, not liable to expire) waits for that
+ *   scan with its own budget instead of scanning again on the other lane; it takes no MAX_PENDING slot.
  * - **Queue bound.** At most {@link MAX_PENDING} searches are outstanding — a budget-timed-out one counts until the
  *   worker answers it, since it still occupies the worker — and beyond that a call resolves
  *   `{ skipped: "queue" }` at once instead of piling scans behind each other.
  * - **Lanes (MCP-ISSUE-136).** A worker scans one request at a time, so a search posted behind another one's scan
  *   waited for it: after a run landed (memo cleared), the big repo's rescan held a small repo's search for the whole
- *   budget. An idle worker takes each request; with every worker busy a second one is spawned, at most
- *   {@link MAX_WORKERS}. The memo is shared, so a second lane's cold memo costs no rescan of a known query.
- * - **Lifetime.** Spawned lazily on the first padded query; every worker is terminated after {@link IDLE_EXIT_MS}
- *   without a request (the next query spawns a fresh one), and on server shutdown.
+ *   budget. {@link MAX_WORKERS} lanes are kept, and an idle one takes each request. The memo is shared, so a second
+ *   lane's cold memo costs no rescan of a known query.
+ * - **Lifetime.** All lanes are spawned together on the first padded query, and each is warmed at once (connection
+ *   open, sqlite-vec loaded), so no search waits for a lane's start-up. A missing lane (retired, crashed, idle-exited)
+ *   is replaced on the next search. Every worker is terminated after {@link IDLE_EXIT_MS} without a request, and on
+ *   server shutdown.
  * - **Invalidation.** `invalidate()` (from `onRunLanded` / `onPurged`) clears the memo here and every worker's KNN memo.
  */
 
@@ -67,13 +71,34 @@ export type SpawnVectorWorker = () => VectorWorkerLike;
 export const spawnVectorSearchWorker: SpawnVectorWorker = () =>
   new Worker(new URL("./vectorSearchWorker.js", import.meta.url)) as unknown as VectorWorkerLike;
 
-type Pending = {
-  settle: (o: VectorSearchOutcome) => void;
-  timer: NodeJS.Timeout | null;
+/** One caller waiting for a request's answer, released at its own budget. */
+type Waiter = { settle: (o: VectorSearchOutcome) => void; timer: NodeJS.Timeout | null };
+
+type Pending = Waiter & {
   worker: VectorWorkerLike;
   key: string;
   generation: number;
+  /** Posted with a deadline (queued behind another scan): it may be dropped unscanned, so nobody joins it. */
+  mayExpire: boolean;
+  /** Later identical searches that joined this request instead of scanning again on another lane. */
+  joiners: Waiter[];
 };
+
+function waiter(resolve: (o: VectorSearchOutcome) => void, waitMs: number): Waiter {
+  const w: Waiter = { settle: resolve, timer: null };
+  w.timer = setTimeout(() => {
+    w.timer = null;
+    w.settle({ skipped: "budget" });
+    w.settle = () => {};
+  }, waitMs);
+  w.timer.unref();
+  return w;
+}
+
+function release(w: Waiter, outcome: VectorSearchOutcome): void {
+  if (w.timer) clearTimeout(w.timer);
+  w.settle(outcome);
+}
 
 const memoKey = (repoId: string, k: number, text: string): string => `${repoId}\u0000${String(k)}\u0000${text}`;
 const copyRows = (rows: readonly Readonly<VectorRow>[]): VectorRow[] => rows.map((r) => ({ ...r }));
@@ -124,6 +149,14 @@ export class VectorSearchWorkerClient {
     const key = memoKey(repoId, k, text);
     const known = this.memo.get(key);
     if (known) return Promise.resolve({ rows: copyRows(known) });
+    // Row 4: the same query already being scanned is joined, not scanned again on the other lane. A caller that retried
+    // after `budget` started a duplicate scan there, and both lanes were then busy with one query (test:freshness-worker
+    // settle phase, 17 Nov), so another repo's search queued behind them.
+    for (const p of this.pending.values()) {
+      if (p.key === key && p.generation === this.generation && !p.mayExpire) {
+        return new Promise<VectorSearchOutcome>((resolve) => p.joiners.push(waiter(resolve, waitMs)));
+      }
+    }
     if (this.pending.size >= MAX_PENDING) return Promise.resolve({ skipped: "queue" });
     const worker = this.pickWorker();
     // Only a request queued behind another one carries a deadline. The lane's first request is always scanned: it may
@@ -132,15 +165,10 @@ export class VectorSearchWorkerClient {
     const queued = this.inFlight(worker) > 0;
     const id = this.nextId++;
     return new Promise<VectorSearchOutcome>((resolve) => {
-      const entry: Pending = { settle: resolve, timer: null, worker, key, generation: this.generation };
       // The caller stops waiting at the budget. A scan already running finishes and its answer is memoized HERE, in
       // onMessage; a request still queued behind another scan by then is dropped in the worker (`deadline`).
-      entry.timer = setTimeout(() => {
-        entry.timer = null;
-        entry.settle({ skipped: "budget" });
-        entry.settle = () => {};
-      }, waitMs);
-      entry.timer.unref();
+      // Object.assign keeps the waiter object itself: its budget timer rewrites that object's `settle` and `timer`.
+      const entry: Pending = Object.assign(waiter(resolve, waitMs), { worker, key, generation: this.generation, mayExpire: queued, joiners: [] as Waiter[] });
       this.pending.set(id, entry);
       worker.postMessage({ kind: "search", id, dbPath: this.dbPath, repoId, text, k, ...(queued ? { deadline: Date.now() + waitMs } : {}) });
       if (!queued) this.armLane(worker);
@@ -172,13 +200,16 @@ export class VectorSearchWorkerClient {
 
   /**
    * MCP-ISSUE-136: an idle worker takes the request (the first idle one, so the usual single query keeps one warm
-   * memo); with every worker busy a new one is spawned, up to MAX_WORKERS; past that, the least busy one queues it.
+   * memo); past that, the least busy one queues it. Every search first tops the lanes up to MAX_WORKERS, each
+   * warmed at once: a second lane spawned only when the first was busy made the search that needed it wait for the
+   * thread's start-up (1-1.7 s under load, test:freshness-worker 17 Nov), and a lane retired or crashed is replaced
+   * before it is needed again.
    */
   private pickWorker(): VectorWorkerLike {
     this.clearIdle();
+    while (this.workers.length < MAX_WORKERS) this.spawnWorker();
     const idle = this.workers.find((w) => this.inFlight(w) === 0);
     if (idle) return idle;
-    if (this.workers.length < MAX_WORKERS) return this.spawnWorker();
     return this.workers.reduce((a, b) => (this.inFlight(b) < this.inFlight(a) ? b : a));
   }
 
@@ -189,6 +220,7 @@ export class VectorSearchWorkerClient {
     w.on("error", () => this.onGone(w));
     w.on("exit", () => this.onGone(w));
     this.workers.push(w);
+    w.postMessage({ kind: "warm", id: 0, dbPath: this.dbPath });
     return w;
   }
 
@@ -196,12 +228,14 @@ export class VectorSearchWorkerClient {
     const p = this.pending.get(m.id);
     if (!p) return;
     this.pending.delete(m.id);
-    if (p.timer) clearTimeout(p.timer);
     // The lane finished its request in hand; the next one queued there (if any) starts now.
     this.clearLane(p.worker);
     if (this.inFlight(p.worker) > 0) this.armLane(p.worker);
     if (m.kind === "result" && p.generation === this.generation) this.remember(p.key, m.rows);
-    p.settle(m.kind === "result" ? { rows: m.rows } : m.kind === "expired" ? { skipped: "budget" } : { skipped: "worker-error" });
+    const outcome = (): VectorSearchOutcome =>
+      m.kind === "result" ? { rows: copyRows(m.rows) } : m.kind === "expired" ? { skipped: "budget" } : { skipped: "worker-error" };
+    release(p, outcome());
+    for (const j of p.joiners) release(j, outcome());
     if (this.pending.size === 0) this.armIdle();
   }
 
@@ -256,8 +290,7 @@ export class VectorSearchWorkerClient {
     for (const [id, p] of [...this.pending]) {
       if (!which(p)) continue;
       this.pending.delete(id);
-      if (p.timer) clearTimeout(p.timer);
-      p.settle({ skipped: "worker-error" });
+      for (const w of [p, ...p.joiners]) release(w, { skipped: "worker-error" });
     }
   }
 

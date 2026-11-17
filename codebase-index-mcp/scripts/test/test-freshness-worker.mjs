@@ -188,10 +188,14 @@ try {
   // Settle both: clean trees at the indexed HEAD, so neither query below starts a run of its own. IX-B: a read no longer
   // waits for a run it starts (the repo has a previous index), so poll until each answers fresh — otherwise a settle run
   // lands inside the window below and its "✓ index" line ends the window early.
+  // Row 4 (17 Nov): settled also means the padding scan landed. An answer whose padding was skipped (`budget`) left
+  // its KNN running in a worker lane; under KNN_DELAY that scan was still running at t0, so the window's first big
+  // search took the other lane and waited out its budget (2335 ms, a red at base 9b3867f too). The production case
+  // this must not hide — searching while an earlier padded scan runs — is asserted under KNN_DELAY: "(a) in flight".
   for (const [repoId, query] of [[smallRepo, "smallAlpha"], [bigRepo, "fn_1_1"]]) {
     for (let i = 0; i < 240; i++) {
       const r = await call("search_symbols", { repoId, query, strategy: "name", limit: 5 });
-      if (!r.body?.freshness || r.body.freshness.state === "fresh") break;
+      if ((!r.body?.freshness || r.body.freshness.state === "fresh") && !r.body?.paddingSkipped) break;
       await sleep(250);
     }
   }
@@ -293,6 +297,33 @@ try {
     assert(knnDelays.some((d) => d.at - KNN_DELAY_MS <= t1), "(a) negative control: a delayed big KNN scan ran inside the window", JSON.stringify(knnDelays));
   }
   assert(probes.length >= 5 && maxProbe < BLOCK_MS, `(b) a trivial tool answers in < ${BLOCK_MS} ms throughout`, `n=${probes.length} max=${maxProbe}`);
+
+  // (a) in flight (row 4): the production case the settle-phase change must not hide — a user searches while an
+  // earlier padded scan is still running. Deterministic under KNN_DELAY: a landed run re-arms every lane, the old
+  // delayed scans are waited out, then a padded big search starts a delayed scan and is NOT awaited while small is
+  // searched. Without the delay a scan is too fast to be in flight; the case is skipped.
+  if (KNN_DELAY_MS > 0) {
+    appendFileSync(join(bigDir, "src/m0/file2.ts"), "\nexport function inFlightProbe(): number {\n  return 2;\n}\n");
+    const run = await call("index_repository", { wait: true, repoId: bigRepo, repoPath: bigDir, mode: "incremental" });
+    assert(run.body && !run.body.error, "(a) in flight: a run of big landed (re-arms every lane)", run.text.slice(0, 200));
+    await sleep(KNN_DELAY_MS + 500);
+    const before = knnDelays.length;
+    const bigStart = Date.now();
+    const bigCall = call("search_symbols", { repoId: bigRepo, query: "inFlightProbe", strategy: "name", limit: 5 });
+    await sleep(100);
+    const during = [];
+    while (Date.now() - bigStart < KNN_DELAY_MS - 1200) {
+      const s = await call("search_symbols", { repoId: smallRepo, query: "smallBeta", strategy: "name", limit: 5 });
+      during.push({ at: Date.now() - bigStart, ms: s.ms, ok: s.text.includes("smallBeta") });
+      await sleep(150);
+    }
+    await bigCall;
+    await sleep(Math.max(0, bigStart + KNN_DELAY_MS + 300 - Date.now()));
+    const scan = knnDelays.slice(before).find((d) => d.text === "inFlightProbe");
+    console.log(`  info  in flight: big scan ${scan ? `ended ${scan.at - bigStart} ms after its search` : "not seen"}; small searches meanwhile ${during.map((s) => `${s.ms}@${s.at}`).join(", ")} ms`);
+    assert(scan && during.length >= 3 && during.every((s) => s.at < scan.at - bigStart), "(a) in flight: the small searches ran while the big KNN scan was running", JSON.stringify({ scan, during }));
+    assert(during.every((s) => s.ok && s.ms < 1000), "(a) in flight: each small search answers in < 1 s", JSON.stringify(during));
+  }
 } finally {
   // Row 15: the race's timer is cleared once close settles. Left running, it held the event loop 5 s into (c) and hid
   // that (c) holds nothing of its own — the CI exit 13 (69ae7e7, run 42772428018).

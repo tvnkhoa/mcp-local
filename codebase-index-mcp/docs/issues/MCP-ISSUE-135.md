@@ -98,6 +98,8 @@ is one synchronous vec0 statement, and the scan runs up to 4 of them. The client
   retired. It is dropped from the lanes at once, its waiters settle `worker-error` and leave `MAX_PENDING`, the next
   search spawns a fresh worker, and the worker is terminated. Termination takes effect when the statement in hand
   returns, so the rest of the scan and the lane's queue never run.
+- **Join, warm lanes** (same row, MCP-ISSUE-136 residual): a repeated query joins the scan in flight instead of
+  starting a second one, and every lane is spawned and warmed on first use.
 - **Memo copies** (row 1 review). A memo hit returns a fresh copy, and the memo holds a frozen copy. Before this, a
   caller that edited the rows it got changed every later answer.
 

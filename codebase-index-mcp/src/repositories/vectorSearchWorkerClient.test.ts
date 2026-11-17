@@ -54,8 +54,9 @@ test("answers within the budget resolve with the rows; the worker is spawned laz
   assert.equal(spawned.length, 0, "no worker before the first search");
   assert.deepEqual(await c.search("r", "foo", 5, 1_000), { rows: [{ symbolId: "s1", distance: 0.5 }] });
   assert.deepEqual(await c.search("r", "bar", 5, 1_000), { rows: [{ symbolId: "s1", distance: 0.5 }] });
-  assert.equal(spawned.length, 1);
-  const first = spawned[0]!.posted[0] as SearchReq;
+  assert.equal(spawned.length, MAX_WORKERS, "every lane is spawned on the first search (MCP-ISSUE-136: no search waits for a lane start-up)");
+  assert.deepEqual(spawned.map((w) => w.posted[0]), spawned.map(() => ({ kind: "warm", id: 0, dbPath: "db.sqlite" })), "and warmed at once");
+  const first = spawned[0]!.posted.find((r) => r.kind === "search") as SearchReq;
   assert.deepEqual({ dbPath: first.dbPath, repoId: first.repoId, text: first.text, k: first.k }, { dbPath: "db.sqlite", repoId: "r", text: "foo", k: 5 });
   await c.dispose();
 });
@@ -98,7 +99,7 @@ test("a worker error or exit settles its waiters with `error`; the next search s
   assert.deepEqual(await c.search("r", "boom", 5, 1_000), { skipped: "worker-error" });
   assert.deepEqual(await c.search("r", "die", 5, 1_000), { skipped: "worker-error" });
   assert.deepEqual(await c.search("r", "ok", 5, 1_000), { rows: [] });
-  assert.equal(spawned.length, 2);
+  assert.equal(spawned.length, MAX_WORKERS + 1, "the dead lane was replaced on the next search");
   await c.dispose();
 });
 
@@ -113,7 +114,7 @@ test("idle: the worker is asked to exit after idleExitMs without a request; inva
   assert.equal(spawned[0]!.posted.at(-1)?.kind, "exit");
   assert.equal(c.isRunning, false);
   await c.search("r", "b", 5, 1_000);
-  assert.equal(spawned.length, 2, "a search after the idle exit spawns a new worker");
+  assert.equal(spawned.length, 2 * MAX_WORKERS, "a search after the idle exit spawns the lanes again");
   await c.dispose();
 });
 
@@ -258,7 +259,7 @@ test("lane cap: a scan past laneCapMs retires its lane — waiters settled, work
   assert.equal(c.workerCount, 0);
   assert.equal(c.pendingCount, 0, "a retired lane's requests no longer count against MAX_PENDING");
   assert.deepEqual(await c.search("r", "fine", 5, 1_000), { rows: [] });
-  assert.equal(spawned.length, 3, "a fresh lane answered");
+  assert.equal(spawned.length, 2 * MAX_WORKERS, "fresh lanes answered");
   clearInterval(keepAlive);
   await c.dispose();
 });
@@ -307,6 +308,78 @@ test("expired: a request still queued at its deadline is dropped unscanned; the 
   await c.search("r", "late", 5, 1_000);
   assert.equal(spawned[0]!.posted.filter((r) => r.kind === "search").length, 2, "an expired answer is not memoized");
   await c.dispose();
+});
+
+test("join: an identical search while one is in flight joins it — one scan, both lanes not taken; never across invalidate()", async () => {
+  const held: (() => void)[] = [];
+  const { c, spawned } = client((req, reply) => {
+    held.push(() => reply({ kind: "result", id: req.id, rows: [{ symbolId: req.text, distance: 0.3 }], ms: 1 }));
+  });
+  const searches = () => spawned.flatMap((w) => w.posted.filter((r) => r.kind === "search"));
+  const keepAlive = setInterval(() => {}, 1_000);
+  const first = c.search("big", "slow", 5, 5_000);
+  // The caller that retries after its budget: joins, with a budget of its own.
+  assert.deepEqual(await c.search("big", "slow", 5, 20), { skipped: "budget" }, "a joiner is released at its own budget");
+  const third = c.search("big", "slow", 5, 5_000);
+  assert.equal(searches().length, 1, "one scan for three callers");
+  assert.equal(c.pendingCount, 1, "joiners take no MAX_PENDING slot");
+  const other = c.search("small", "x", 5, 5_000);
+  assert.equal(new Set(searches().map((r) => spawned.findIndex((w) => w.posted.includes(r)))).size, 2, "the other lane stayed free for another query");
+  held.shift()!();
+  const a = await first;
+  const b = await third;
+  assert.deepEqual([a, b], [{ rows: [{ symbolId: "slow", distance: 0.3 }] }, { rows: [{ symbolId: "slow", distance: 0.3 }] }]);
+  assert.ok("rows" in a && "rows" in b && a.rows !== b.rows, "each caller gets its own copy");
+  held.shift()!();
+  await other;
+
+  const before = c.search("big", "gen", 5, 5_000);
+  c.invalidate();
+  void c.search("big", "gen", 5, 5_000);
+  assert.equal(searches().filter((r) => r.text === "gen").length, 2, "a request posted before invalidate() is not joined: its rows may be stale");
+  held.shift()!();
+  await before;
+  clearInterval(keepAlive);
+  await c.dispose();
+});
+
+test("join: a dying lane fails its joiners too", async () => {
+  let kill: (() => void) | null = null;
+  const { c } = client((_req, _reply, self) => {
+    kill = () => void self.terminate();
+  });
+  const keepAlive = setInterval(() => {}, 1_000);
+  const a = c.search("r", "q", 5, 5_000);
+  const b = c.search("r", "q", 5, 5_000);
+  (kill as unknown as () => void)();
+  assert.deepEqual(await Promise.all([a, b]), [{ skipped: "worker-error" }, { skipped: "worker-error" }]);
+  clearInterval(keepAlive);
+  await c.dispose();
+});
+
+test("warm: opens the lane's connection ahead of its first search; a failed warm is retried by that search", () => {
+  let opened = 0;
+  let loaded = 0;
+  const fakeDb = { close: () => {} } as unknown as Database.Database;
+  const h = createSearchHandler({
+    open: (p) => {
+      opened++;
+      if (p === "bad") throw new Error("cannot open");
+      return fakeDb;
+    },
+    loadVec: () => {
+      loaded++;
+      return false;
+    }
+  });
+  h.warm("good");
+  assert.deepEqual([opened, loaded], [1, 1], "warm opened and loaded");
+  h.answer({ kind: "search", id: 1, dbPath: "good", repoId: "r", text: "t", k: 1 });
+  assert.deepEqual([opened, loaded], [1, 1], "the first search reuses the warm connection");
+  assert.doesNotThrow(() => h.warm("bad"), "a failed warm throws nothing");
+  const after = h.answer({ kind: "search", id: 2, dbPath: "bad", repoId: "r", text: "t", k: 1 });
+  assert.equal(opened, 3, "the search tried to open again");
+  assert.match(after.kind === "error" ? after.message : "", /cannot open/, "and reported the failure to its caller");
 });
 
 test("expired: only a request queued behind another scan carries a deadline; a lane's first request is always scanned", async () => {
