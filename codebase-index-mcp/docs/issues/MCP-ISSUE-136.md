@@ -63,4 +63,26 @@ repo that changed, and the budget exists for it.
   - Fixed client: exit 0, `small` ≤ 472 ms (the first one on a cold lane). The delayed `big` scan is asserted to
     have run inside the window, and the post-landing `big` poll paid its own 2.15 s.
   - Without the delay: green.
+### Residual: a cold second lane and duplicate scans (17 Nov, row 4, branch `wt/knn-cancel`)
+
+After this fix `test:freshness-worker` was still flaky at 9b3867f (row 1's lanes), alone and with the box quiet. In
+the KNN_DELAY 2900 variant base went red 1 run in 5: the first small search took 1026 ms. The fix build of row 4's
+first commit was red 2 runs in 6, and the default variant was red once under load: the first small search took 1689 ms.
+There were two causes:
+
+- **Cold lane.** Lane 2 was spawned only when lane 1 was busy, so the search that needed it waited for the thread to
+  boot, open the DB and load sqlite-vec: 1.0-1.7 s under load, up to ~2.5 s on a scratch measurement. Fix: every lane
+  is spawned on the first padded search and warmed at once (a `warm` message opens the connection and loads
+  sqlite-vec). A lane that is retired or crashes is replaced on the next search.
+- **Duplicate scan.** A caller that retried after `budget` (the harness settle loop, or a user re-running a search)
+  started a second scan of the same query on the other lane, so both lanes were busy with one query. A search of
+  another repo then queued behind them. In the KNN_DELAY variant the duplicate was still running at t0, and the
+  window's first big search waited out its budget (2335 ms). Fix: a search for a query already in flight joins that
+  scan with its own budget. It never joins a request from before `invalidate()`, or one that may expire.
+
+The harness settle loop also waits until its search reports no `paddingSkipped`, so no setup scan runs into the
+window. The production case, "search while another repo's padded scan is in flight", is asserted on its own by
+"(a) in flight" under KNN_DELAY. A run of big lands, which re-arms every lane. A padded big search then starts a delayed
+scan that is not awaited, and small is searched meanwhile: each search must answer in < 1 s.
+
 - **Enhancement proposal:** pass the landed repoId through `onProcessCachesInvalidated` so the memo is cleared per repo.
