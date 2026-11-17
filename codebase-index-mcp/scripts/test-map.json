@@ -371,6 +371,11 @@
       "@dist",
       "codebase-index-mcp/src/tools/handlers/searchHandler.ts"
     ],
+    "test:bundle-boot": [
+      "codebase-index-mcp/scripts/test/test-bundle-boot.mjs",
+      "@dist",
+      "codebase-index-mcp/scripts/bundle.mjs"
+    ],
     "test:server-envelopes": [
       "codebase-index-mcp/scripts/test/test-server-envelopes.mjs",
       "@dist",

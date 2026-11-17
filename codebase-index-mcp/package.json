@@ -67,6 +67,7 @@
     "benchmark:plan": "node scripts/benchmark-plan-mode.mjs",
     "benchmark:plan:check": "node scripts/benchmark-plan-mode.mjs",
     "test:impact-join-parity": "node scripts/test/test-impact-join-parity.mjs",
+    "test:bundle-boot": "node scripts/test/test-bundle-boot.mjs",
     "test:server-envelopes": "node scripts/test/test-server-envelopes.mjs",
     "test:sqlite-guardrails": "node scripts/test/test-sqlite-guardrails.mjs",
     "test:query-graph-timeout": "node scripts/test/test-query-graph-timeout.mjs",
