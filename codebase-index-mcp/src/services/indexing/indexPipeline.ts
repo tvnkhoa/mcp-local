@@ -168,7 +168,10 @@ export type RunIndexInput = {
 // (`ITenantRepository : IPureRepository<Tenant>`) binds the base interface's declaration, never another interface's
 // same-named method, and a bare token guessed onto an interface yields to its proven qualified sibling: CALLS change
 // for unchanged files, so existing indexes must re-resolve on a FULL run.
-export const INDEX_VERSION = "v19-inherited-iface-method";
+// v20: MCP-ISSUE-137 — base-class dispatch binds each subclass TYPE's own override (owner link; a C# partial
+// subclass's other parts count), not the first same-named override in the subclass's file, and its fan-out cap
+// counts types: base-class-dispatch CALLS change for unchanged files, so existing indexes must re-resolve on a FULL run.
+export const INDEX_VERSION = "v20-override-owner";
 
 /**
  * Release J: files whose change alters how every other file resolves — module resolution (tsconfig paths,
