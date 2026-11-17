@@ -333,6 +333,7 @@ Gate: 4/4 servers build + typecheck, 36/36 harnesses (63 assertions in the 049 h
 - [MCP-ISSUE-133 — interface dispatch bound a call to the first same-named method in the implementer's FILE, not the implementer type's own method](issues/MCP-ISSUE-133.md)
 - [MCP-ISSUE-134 — every read tool call did blocking file I/O on the server thread (HEAD files, run markers, dirty ledger)](issues/MCP-ISSUE-134.md)
 - [MCP-ISSUE-135 — query_graph did not enforce timeoutMs: a heavy query froze the server thread for every session](issues/MCP-ISSUE-135.md)
+- [MCP-ISSUE-136 — a padded search_symbols waited the whole 2 s budget behind another repo's KNN rescan](issues/MCP-ISSUE-136.md)
 - [MCP-ISSUE-137 — base-class fan-out finds an override by the subclass's FILE, so it can reach another class's same-named method](issues/MCP-ISSUE-137.md)
 - [Confirmed fixed — 2026-08-05 re-verification of the 042–051 wave](issues/confirmed-fixed-2026-08-05-re-verification-of-the-042-051-wave.md)
 - [MCP-ISSUE-101 follow-ups (row 5: F2–F4)](issues/mcp-issue-101-follow-ups-row-5-f2-f4.md)
