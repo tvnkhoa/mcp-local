@@ -11,7 +11,7 @@ import test from "node:test";
 import Database from "better-sqlite3";
 
 import { GraphStore } from "./graphStore.js";
-import { MAX_PENDING, VectorSearchWorkerClient, type VectorWorkerLike } from "./vectorSearchWorkerClient.js";
+import { MAX_PENDING, MAX_WORKERS, VectorSearchWorkerClient, type VectorWorkerLike } from "./vectorSearchWorkerClient.js";
 import { createSearchHandler, type VectorSearchMessage, type VectorSearchRequest } from "./vectorSearchWorker.js";
 import { batchUpsertSymbolVectors, initVectorStore } from "./vectorStore.js";
 
@@ -114,6 +114,63 @@ test("idle: the worker is asked to exit after idleExitMs without a request; inva
   assert.equal(c.isRunning, false);
   await c.search("r", "b", 5, 1_000);
   assert.equal(spawned.length, 2, "a search after the idle exit spawns a new worker");
+  await c.dispose();
+});
+
+// MCP-ISSUE-136: one serial worker made a small repo's search wait out the budget behind the big repo's rescan
+// (CI e109539: 2073 ms). A search posted while a worker is busy takes an idle lane instead.
+test("lanes: a search posted while the worker scans another one is answered by a second worker, at once", async () => {
+  const held: (() => void)[] = [];
+  const { c, spawned } = client((req, reply) => {
+    const send = () => reply({ kind: "result", id: req.id, rows: [{ symbolId: req.text, distance: 0.1 }], ms: 1 });
+    if (req.repoId === "big") held.push(send);
+    else setImmediate(send);
+  });
+  const keepAlive = setInterval(() => {}, 1_000);
+  const slow = c.search("big", "fn_7_1", 5, 5_000);
+  const t0 = performance.now();
+  assert.deepEqual(await c.search("small", "smallBeta", 5, 5_000), { rows: [{ symbolId: "smallBeta", distance: 0.1 }] });
+  assert.ok(performance.now() - t0 < 500, "not queued behind the held scan");
+  assert.equal(spawned.length, 2);
+  assert.equal(spawned[1]!.posted.filter((r) => r.kind === "search").length, 1, "the second lane took the small search");
+  // Both idle again: the first lane is preferred, so the usual one-at-a-time traffic keeps one warm memo.
+  held.shift()!();
+  assert.deepEqual(await slow, { rows: [{ symbolId: "fn_7_1", distance: 0.1 }] });
+  await c.search("small", "again", 5, 5_000);
+  assert.equal(spawned[0]!.posted.filter((r) => r.kind === "search").length, 2);
+  c.invalidate();
+  assert.deepEqual(spawned.map((w) => w.posted.at(-1)?.kind), ["invalidate", "invalidate"], "invalidate reaches every lane");
+  clearInterval(keepAlive);
+  await c.dispose();
+});
+
+test("lanes: never more than MAX_WORKERS; past that a search queues on the least busy lane", async () => {
+  const { c, spawned } = client(() => {
+    /* never answers */
+  });
+  const waits = Array.from({ length: MAX_PENDING }, (_, i) => c.search("r", `q${String(i)}`, 5, 10_000));
+  assert.equal(spawned.length, MAX_WORKERS);
+  const perLane = spawned.map((w) => w.posted.filter((r) => r.kind === "search").length);
+  assert.ok(Math.max(...perLane) - Math.min(...perLane) <= 1, `balanced: ${JSON.stringify(perLane)}`);
+  await c.dispose();
+  for (const w of waits) assert.deepEqual(await w, { skipped: "worker-error" });
+});
+
+test("lanes: a worker that dies fails only its own waiters; the other lane answers on", async () => {
+  let releaseOther: (() => void) | null = null;
+  const { c, spawned } = client((req, reply, self) => {
+    if (req.text === "die") setImmediate(() => void self.terminate());
+    else if (req.text === "hold") releaseOther = () => reply({ kind: "result", id: req.id, rows: [], ms: 1 });
+    else setImmediate(() => reply({ kind: "result", id: req.id, rows: [], ms: 1 }));
+  });
+  const keepAlive = setInterval(() => {}, 1_000);
+  const held = c.search("r", "hold", 5, 5_000);
+  assert.deepEqual(await c.search("r", "die", 5, 5_000), { skipped: "worker-error" });
+  assert.equal(c.workerCount, 1, "the dead lane is gone, the busy one stays");
+  (releaseOther as unknown as () => void)();
+  assert.deepEqual(await held, { rows: [] }, "the surviving lane's waiter is not failed");
+  assert.equal(spawned.length, 2);
+  clearInterval(keepAlive);
   await c.dispose();
 });
 

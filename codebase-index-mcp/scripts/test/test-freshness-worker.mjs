@@ -11,6 +11,9 @@
  *   (a) a dirty edit to DIRTY_FILES files of `big`; the first search_symbols on `big` answers within
  *       its budget + 1 s (freshness "refreshing" when the run outlives the budget), while search_symbols
  *       on `small`, issued every 150 ms through the refresh, each answer in < 1 s;
+ *       MCP-ISSUE-136: the `small` searches pad through the vector-search worker; after `big` lands, `big`'s first
+ *       padded search rescans. FRESHNESS_WORKER_KNN_DELAY_MS=2900 slows that rescan to CI's measured 2.9 s: with one
+ *       serial worker a `small` search queued behind it and took the whole 2 s budget (CI e109539 attempt 1: 2073 ms);
  *   (b) no main-thread block > 250 ms from the trigger until the refresh has landed (the sampler), and
  *       a trivial list_repositories probe every 100 ms stays < 250 ms;
  *       after landing, the edit is found and the answer is current;
@@ -115,9 +118,30 @@ if (isMainThread) {
   t.unref();
 }
 `)}`;
+// MCP-ISSUE-136 negative control: FRESHNESS_WORKER_KNN_DELAY_MS=<ms> makes the vector-search worker's first `big` KNN
+// after each memo invalidation take that long (a run landing invalidates; CI's scan of `big` took ~2.9 s, e109539). With
+// one serial worker, a `small` search posted behind that scan waited the whole 2 s padding budget; (a) caught it.
+const KNN_DELAY_MS = Number(process.env.FRESHNESS_WORKER_KNN_DELAY_MS ?? 0);
+const knnDelayPreload = `data:text/javascript,${encodeURIComponent(`
+import { isMainThread, parentPort } from "node:worker_threads";
+if (!isMainThread && parentPort) {
+  let armed = false;
+  const on = parentPort.on.bind(parentPort);
+  parentPort.on = (event, fn) => event !== "message" ? on(event, fn) : on(event, (m) => {
+    if (m && m.kind === "invalidate" && m.id === 0) armed = true;
+    else if (m && m.kind === "search" && typeof m.dbPath === "string" && m.repoId === ${JSON.stringify(bigRepo)} && armed) {
+      armed = false;
+      const end = Date.now() + ${KNN_DELAY_MS};
+      while (Date.now() < end) { /* a slow KNN scan of big */ }
+      process.stderr.write("[knn-delay] " + JSON.stringify({ at: end, text: m.text }) + "\\n");
+    }
+    return fn(m);
+  });
+}
+`)}`;
 const transport = new StdioClientTransport({
   command: "node",
-  args: ["--import", sampler, ...(INJECT_BLOCK_MS > 0 ? ["--import", injectPreload] : []), "dist/index.js"],
+  args: ["--import", sampler, ...(INJECT_BLOCK_MS > 0 ? ["--import", injectPreload] : []), ...(KNN_DELAY_MS > 0 ? ["--import", knnDelayPreload] : []), "dist/index.js"],
   env: {
     ...process.env,
     CODEBASE_INDEX_ALLOWED_ROOTS: root,
@@ -129,6 +153,7 @@ const transport = new StdioClientTransport({
   stderr: "pipe"
 });
 const lags = [];
+const knnDelays = [];
 let landedLine = null;
 let buf = "";
 transport.stderr?.on("data", (d) => {
@@ -139,6 +164,7 @@ transport.stderr?.on("data", (d) => {
     buf = buf.slice(i + 1);
     const m = /^\[lag-sampler\] (.*)$/.exec(line);
     if (m) { try { lags.push(JSON.parse(m[1])); } catch { /* partial line */ } }
+    else if (line.startsWith("[knn-delay] ")) { try { knnDelays.push(JSON.parse(line.slice(12))); } catch { /* partial line */ } }
     else if (line.includes(`✓ index ${bigRepo}`)) landedLine = line.trim();
   }
 });
@@ -228,7 +254,8 @@ try {
     if (r.body?.freshness?.state !== "refreshing" || landedLine !== null) landed = r;
   }
   if (process.env.FRESHNESS_WORKER_DIAG) {
-    console.log(`  diag  polls ${JSON.stringify(polls.slice(0, 40))}`);
+    console.log(`  diag  polls ${JSON.stringify(polls.slice(0, 3))} … last ${JSON.stringify(polls.slice(-3))}`);
+    console.log(`  diag  small ${JSON.stringify(smallTimes.slice(-4))}`);
     const counts = {};
     for (const s of smallTimes) counts[`${s.state}:${s.reason}`] = (counts[`${s.state}:${s.reason}`] ?? 0) + 1;
     console.log(`  diag  small states ${JSON.stringify(counts)}`);
@@ -260,6 +287,11 @@ try {
   console.log(`  info  main-thread ticks late > 100 ms during the refresh: ${windowLags.length}, max ${maxLag} ms; list_repositories probes n=${probes.length}, max ${maxProbe} ms`);
   console.log(`  info  bound ${BLOCK_MS} ms = ${process.env.FRESHNESS_WORKER_BLOCK_MS ? "FRESHNESS_WORKER_BLOCK_MS" : `max(${BLOCK_FLOOR_MS}, ${BLOCK_PER_SETUP_RUN} × setup run ${setupBigMs} ms)`}${INJECT_BLOCK_MS > 0 ? `; NEGATIVE CONTROL injected ${INJECT_BLOCK_MS} ms` : ""}`);
   assert(maxLag <= BLOCK_MS, `(b) no server main-thread block > ${BLOCK_MS} ms during the refresh`, JSON.stringify(windowLags.slice(0, 10)));
+  if (KNN_DELAY_MS > 0) {
+    await sleep(KNN_DELAY_MS);
+    console.log(`  info  KNN delay (${KNN_DELAY_MS} ms) ended at (ms after t0): ${JSON.stringify(knnDelays.map((d) => ({ at: d.at - t0, text: d.text })))}`);
+    assert(knnDelays.some((d) => d.at - KNN_DELAY_MS <= t1), "(a) negative control: a delayed big KNN scan ran inside the window", JSON.stringify(knnDelays));
+  }
   assert(probes.length >= 5 && maxProbe < BLOCK_MS, `(b) a trivial tool answers in < ${BLOCK_MS} ms throughout`, `n=${probes.length} max=${maxProbe}`);
 } finally {
   // Row 15: the race's timer is cleared once close settles. Left running, it held the event loop 5 s into (c) and hid
