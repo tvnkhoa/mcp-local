@@ -164,12 +164,12 @@ test("release F: an older build refuses to write over a newer build, never the o
   // signatures) was 14; MCP-ISSUE-101 part 4 (ties break on the file path) was 15; the tree-sitter Python
   // lane (PY-1..PY-4) was 16; owner-keyed interface dispatch and the last Python Protocol items
   // (MCP-ISSUE-133 / MCP-ISSUE-128) were 17; dispatch to a method inherited from a base class (MCP-ISSUE-133
-  // row #10) is 18.
-  assert.equal(indexGeneration(INDEX_VERSION), 18);
-  assert.equal(newerBuildRefusal("v17-owner-dispatch-py-protocols", INDEX_VERSION), null, "v18 upgrades a v17 index");
-  assert.ok((newerBuildRefusal(INDEX_VERSION, "v17-owner-dispatch-py-protocols") ?? "").includes(INDEX_VERSION), "a v17 build refuses to write over a v18 index");
-  // An index fully built at v17 (ad5ddd0) escalates its next scoped run to FULL.
-  assert.match(versionEscalation({ mode: "full", version: "v17-owner-dispatch-py-protocols" }, true, INDEX_VERSION) ?? "", /v17-owner-dispatch-py-protocols/);
+  // row #10) was 18; a call on a method inherited from a base INTERFACE (MCP-ISSUE-133 row 5) is 19.
+  assert.equal(indexGeneration(INDEX_VERSION), 19);
+  assert.equal(newerBuildRefusal("v18-inherited-dispatch", INDEX_VERSION), null, "v19 upgrades a v18 index");
+  assert.ok((newerBuildRefusal(INDEX_VERSION, "v18-inherited-dispatch") ?? "").includes(INDEX_VERSION), "a v18 build refuses to write over a v19 index");
+  // An index fully built at v18 (235e091) escalates its next scoped run to FULL.
+  assert.match(versionEscalation({ mode: "full", version: "v18-inherited-dispatch" }, true, INDEX_VERSION) ?? "", /v18-inherited-dispatch/);
 });
 
 test("release I1b: only a full run or a bulk resolve drops the DB-wide edge indexes", () => {

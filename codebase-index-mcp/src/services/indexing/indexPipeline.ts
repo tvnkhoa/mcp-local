@@ -164,7 +164,11 @@ export type RunIndexInput = {
 // v18: MCP-ISSUE-133 row #10 — interface dispatch reaches a method the implementer INHERITS from an in-repo base
 // class (`class Impl : Base, IFoo`, the most-derived declaration up the EXTENDS chain): interface-dispatch CALLS
 // change for unchanged files, so existing indexes must re-resolve on a FULL run.
-export const INDEX_VERSION = "v18-inherited-dispatch";
+// v19: MCP-ISSUE-133 row 5 — a C#/TS call on a method the receiver's interface only INHERITS from a base interface
+// (`ITenantRepository : IPureRepository<Tenant>`) binds the base interface's declaration, never another interface's
+// same-named method, and a bare token guessed onto an interface yields to its proven qualified sibling: CALLS change
+// for unchanged files, so existing indexes must re-resolve on a FULL run.
+export const INDEX_VERSION = "v19-inherited-iface-method";
 
 /**
  * Release J: files whose change alters how every other file resolves — module resolution (tsconfig paths,
