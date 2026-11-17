@@ -23,6 +23,12 @@
  *                                                 # exactly the mapped harnesses + what always runs: a changed file
  *                                                 # not in test-map.json is a warning, not the whole suite (exit 0
  *                                                 # unless a harness fails); an unresolvable base exits 2
+ *   node scripts/run-tests.mjs --changed [<base>] --mapped-only --max <n>
+ *                                                 # cap on the MAPPED harnesses (what always runs and scripts with
+ *                                                 # no map entry do not count); default 12 with --mapped-only, no
+ *                                                 # cap without it. Over the cap: prints the selection and exits 3,
+ *                                                 # running nothing (--list too) — a member's gate must never
+ *                                                 # become the whole suite
  *   node scripts/run-tests.mjs --no-lock          # skip the machine-wide heavy-check lock (CI=true skips it too)
  *
  * Stopping the runner stops its children: each script runs as a tracked child, and SIGINT / SIGTERM /
@@ -51,6 +57,19 @@ if (MAPPED_ONLY && !argv.includes("--changed")) {
   console.error("--mapped-only needs --changed [<base>]");
   process.exit(2);
 }
+
+/** The --mapped-only default for --max: a member's touched-harnesses gate, not the merge gate's suite. */
+const DEFAULT_MAPPED_MAX = 12;
+const MAX = (() => {
+  const i = argv.indexOf("--max");
+  if (i < 0) return MAPPED_ONLY ? DEFAULT_MAPPED_MAX : Infinity;
+  const raw = argv[i + 1];
+  if (!argv.includes("--changed") || raw === undefined || !/^[1-9]\d*$/.test(raw)) {
+    console.error("--max <n> takes a positive integer and needs --changed [<base>]");
+    process.exit(2);
+  }
+  return Number(raw);
+})();
 
 const scripts = JSON.parse(fs.readFileSync(path.join(ROOT, "package.json"), "utf8")).scripts ?? {};
 
@@ -90,6 +109,16 @@ function selectChanged() {
   console.log(`selected ${String(result.selected.length)}/${String(suite.length)}:`);
   for (const { name, why } of result.selected) console.log(`  ${name} ← ${why}`);
   console.log("");
+  // Only the harnesses the diff mapped to count against --max: what always runs is cheap and fixed.
+  const mapped = result.selected.filter(({ why }) => why !== "always runs" && why !== "no map entry (fail safe)" && why !== "whole suite");
+  if (!result.whole && mapped.length > MAX) {
+    console.error(
+      `--max ${String(MAX)}: the change maps to ${String(mapped.length)} harnesses (listed above) — nothing was run.\n` +
+        `  Run at most ${String(MAX)} harnesses that exercise your change directly (npm run <test:name>), and leave the rest\n` +
+        "  to the merge gate; or narrow the file's entry in scripts/test-map.json (see its hubs)."
+    );
+    process.exit(3);
+  }
   return result.selected.map(({ name }) => name);
 }
 

@@ -1,5 +1,5 @@
 {
-  "$comment": "Which codebase-index harnesses a change needs: run-tests.mjs --changed. Paths are relative to the workspace root. A changed file that no glob here covers runs the WHOLE suite; skip lists only other servers and pure docs; none lists, one explicit path each, root files no harness loads. test:test-select fails when a suite script has no entry. Rules: scripts/lib/testSelect.mjs. impactHandler.ts, searchHandler.ts and docSection.ts are left out of @dist on purpose (the dist group lists every other src path one by one, so a NEW src file still falls to the whole suite): each is named only by the harnesses that call a tool it serves — grep the tool names in scripts/test/*.mjs before adding a harness.",
+  "$comment": "Which codebase-index harnesses a change needs: run-tests.mjs --changed. Paths are relative to the workspace root. A changed file that no glob here covers runs the WHOLE suite; skip lists only other servers and pure docs; none lists, one explicit path each, root files no harness loads. test:test-select fails when a suite script has no entry. Rules: scripts/lib/testSelect.mjs. impactHandler.ts, searchHandler.ts and docSection.ts are left out of @dist on purpose (the dist group lists every other src path one by one, so a NEW src file still falls to the whole suite): each is named only by the harnesses that call a tool it serves — grep the tool names in scripts/test/*.mjs before adding a harness. Hub files (hubs) are left out of @dist the same way: a file most harnesses reach would select the whole suite, so each is named only by the harnesses that assert its own behaviour, with the reason in hubs; test:test-select fails when a hub is in a group, names a harness that does not list it, or is listed by a harness hubs does not name.",
   "always": [
     "test:unit",
     "guard:no-llm-runtime"
@@ -39,16 +39,50 @@
     "dist": [
       "codebase-index-mcp/src/*.ts",
       "codebase-index-mcp/src/config/**",
-      "codebase-index-mcp/src/middleware/**",
-      "codebase-index-mcp/src/repositories/**",
-      "codebase-index-mcp/src/resources/**",
+      "codebase-index-mcp/src/middleware/coverage.ts",
+      "codebase-index-mcp/src/middleware/errors.ts",
+      "codebase-index-mcp/src/middleware/indexGuardrails.ts",
+      "codebase-index-mcp/src/middleware/inputGuards.ts",
+      "codebase-index-mcp/src/middleware/responseFormatter.ts",
+      "codebase-index-mcp/src/middleware/sqliteGuardrails.ts",
+      "codebase-index-mcp/src/repositories/annotationsStore.ts",
+      "codebase-index-mcp/src/repositories/crossRepoStore.ts",
+      "codebase-index-mcp/src/repositories/docsStore.ts",
+      "codebase-index-mcp/src/repositories/endpointStore.ts",
+      "codebase-index-mcp/src/repositories/graphQueries.ts",
+      "codebase-index-mcp/src/repositories/graphStore.ts",
+      "codebase-index-mcp/src/repositories/literalsStore.ts",
+      "codebase-index-mcp/src/repositories/pathSeparatorMigration.ts",
+      "codebase-index-mcp/src/repositories/queryGraphRunner.ts",
+      "codebase-index-mcp/src/repositories/queryGraphRunnerClient.ts",
+      "codebase-index-mcp/src/repositories/refactorStore.ts",
+      "codebase-index-mcp/src/repositories/repoPurgeStore.ts",
+      "codebase-index-mcp/src/repositories/runStore.ts",
+      "codebase-index-mcp/src/repositories/schema.ts",
+      "codebase-index-mcp/src/repositories/scopedRunStore.ts",
+      "codebase-index-mcp/src/repositories/seedStore.ts",
+      "codebase-index-mcp/src/repositories/sqliteTx.ts",
+      "codebase-index-mcp/src/repositories/vectorSearchWorker.ts",
+      "codebase-index-mcp/src/repositories/vectorStore.ts",
+      "codebase-index-mcp/src/repositories/writeStore.ts",
+      "codebase-index-mcp/src/resources/repoResourceUri.ts",
       "codebase-index-mcp/src/types/**",
       "codebase-index-mcp/src/services/docs/**",
       "codebase-index-mcp/src/services/extractors/**",
       "codebase-index-mcp/src/services/git/**",
       "codebase-index-mcp/src/services/graph/**",
       "codebase-index-mcp/src/services/impact/**",
-      "codebase-index-mcp/src/services/indexing/**",
+      "codebase-index-mcp/src/services/indexing/fileFilter.ts",
+      "codebase-index-mcp/src/services/indexing/fileScan.ts",
+      "codebase-index-mcp/src/services/indexing/indexJobs.ts",
+      "codebase-index-mcp/src/services/indexing/indexProgress.ts",
+      "codebase-index-mcp/src/services/indexing/indexRunner.ts",
+      "codebase-index-mcp/src/services/indexing/refreshWorker.ts",
+      "codebase-index-mcp/src/services/indexing/refreshWorkerClient.ts",
+      "codebase-index-mcp/src/services/indexing/runFinalize.ts",
+      "codebase-index-mcp/src/services/indexing/runLimits.ts",
+      "codebase-index-mcp/src/services/indexing/runPolicy.ts",
+      "codebase-index-mcp/src/services/indexing/skipReport.ts",
       "codebase-index-mcp/src/services/refactor/**",
       "codebase-index-mcp/src/services/runtime/**",
       "codebase-index-mcp/src/services/search/**",
@@ -89,7 +123,6 @@
       "codebase-index-mcp/src/tools/handlers/refactorPreviewHandlers.ts",
       "codebase-index-mcp/src/tools/handlers/testFilter.ts",
       "codebase-index-mcp/src/tools/handlers/traceHandler.ts",
-      "codebase-index-mcp/package.json",
       "codebase-index-mcp/package-lock.json",
       "codebase-index-mcp/tsconfig*.json",
       "codebase-index-mcp/scripts/test/_*.mjs",
@@ -105,6 +138,61 @@
       "codebase-index-mcp/skill/**",
       "codebase-index-mcp/.env.example"
     ]
+  },
+  "hubs": {
+    "codebase-index-mcp/src/middleware/freshness.ts": {
+      "why": "the R1 freshness gate wraps every read tool, so @dist would select the whole suite; these harnesses assert its own behaviour (refresh, deadline, lock, repair, scoped notes); unit: freshness.test.ts, freshnessRepair.test.ts",
+      "harnesses": {
+        "test:freshness-worker": "the gate's refresh runs in the refresh worker; asserts its states and lanes",
+        "test:query-refresh": "a query refreshes a dirty tree through the gate (IX-B)",
+        "test:refresh-deadline": "imports dist/middleware/freshness.js; the refresh budget and deadline",
+        "test:index-lock-contention": "the gate's lock files against a concurrent index run",
+        "test:field-access-vue": "Release D note (1): the freshness note is scoped to index-derived parts",
+        "test:detect-changes-rename": "the gate prunes a git-mv'd path; polls until state leaves refreshing",
+        "test:query-graph-timeout": "the gate's overhead is part of the timed call",
+        "test:refactor-profiles": "a dirty tree makes the first call carry a freshness block"
+      }
+    },
+    "codebase-index-mcp/src/resources/resourceHandler.ts": {
+      "why": "serves MCP resources/list and resources/read; only these harnesses call them",
+      "harnesses": {
+        "test:server-envelopes": "resources/list + resources/read envelopes (buildRepoResources)",
+        "test:issue-049-shapes": "readResource payload shapes"
+      }
+    },
+    "codebase-index-mcp/src/repositories/vectorSearchWorkerClient.ts": {
+      "why": "the KNN lane's worker client; only these harnesses drive the worker; unit: vectorSearchWorkerClient.test.ts",
+      "harnesses": {
+        "test:freshness-worker": "KNN lanes warm on first use, join a scan in flight, are cleared on run landed",
+        "test:index-lock-contention": "vector search while an index run holds the lock",
+        "test:bundle-boot": "the worker URL must sit beside its client in dist/bundle; sqlite-vec loads"
+      }
+    },
+    "codebase-index-mcp/src/services/indexing/indexPipeline.ts": {
+      "why": "every harness indexes through it; these assert the pipeline itself: full vs incremental per lane, run bookkeeping, INDEX_VERSION, determinism, jobs, worktree seed; unit: services/indexing/*.test.ts",
+      "harnesses": {
+        "test:seed-conformance": "two full runs of one tree compare EQUAL, a renamed function DIFFERENT",
+        "test:node-identity": "two identical runs agree on edge counts (MCP-ISSUE-032)",
+        "test:index-jobs": "index_repository as a server-side job, runs reach ok in order",
+        "test:register-worktree": "a seeded worktree index then incremental runs",
+        "test:query-refresh": "incremental refresh of a dirty tree",
+        "test:server-envelopes": "advertised INDEX_VERSION / annotation key",
+        "test:text-json-lane": "full vs incremental for the text/json lane",
+        "test:python-gaps": "full vs incremental for the Python lane",
+        "test:css-symbols": "full vs incremental for the CSS lane",
+        "test:sql-lane": "full vs incremental for the SQL lane",
+        "test:html-svg": "full vs incremental for the HTML/SVG lane",
+        "test:literal-cap-profiles": "incremental runs keep the literal caps"
+      }
+    },
+    "codebase-index-mcp/package.json": {
+      "why": "its scripts are the suite and its dependencies feed the bundle; a test:* script it adds is mapped in the same row",
+      "harnesses": {
+        "test:test-select": "suite discovery from package.json scripts; every script has a map entry",
+        "test:bundle-boot": "dependencies / externals: the bundle boots and loads its native modules",
+        "test:server-envelopes": "the advertised version equals package.json version"
+      }
+    }
   },
   "harnesses": {
     "test:approval-token": [
@@ -157,11 +245,13 @@
       "codebase-index-mcp/scripts/test/test-css-symbols.mjs",
       "@dist",
       "codebase-index-mcp/src/tools/handlers/impactHandler.ts",
-      "codebase-index-mcp/src/tools/handlers/searchHandler.ts"
+      "codebase-index-mcp/src/tools/handlers/searchHandler.ts",
+      "codebase-index-mcp/src/services/indexing/indexPipeline.ts"
     ],
     "test:detect-changes-rename": [
       "codebase-index-mcp/scripts/test/test-detect-changes-rename.mjs",
-      "@dist"
+      "@dist",
+      "codebase-index-mcp/src/middleware/freshness.ts"
     ],
     "test:docs-term": [
       "codebase-index-mcp/scripts/test/test-docs-term.mjs",
@@ -194,7 +284,8 @@
     "test:field-access-vue": [
       "codebase-index-mcp/scripts/test/test-field-access-vue.mjs",
       "@dist",
-      "codebase-index-mcp/src/tools/handlers/impactHandler.ts"
+      "codebase-index-mcp/src/tools/handlers/impactHandler.ts",
+      "codebase-index-mcp/src/middleware/freshness.ts"
     ],
     "test:field-access-worker": [
       "codebase-index-mcp/scripts/test/test-field-access-worker.mjs",
@@ -208,7 +299,9 @@
       "@dist",
       "codebase-index-mcp/src/tools/handlers/impactHandler.ts",
       "codebase-index-mcp/src/tools/handlers/searchHandler.ts",
-      "codebase-index-mcp/scripts/bundle.mjs"
+      "codebase-index-mcp/scripts/bundle.mjs",
+      "codebase-index-mcp/src/middleware/freshness.ts",
+      "codebase-index-mcp/src/repositories/vectorSearchWorkerClient.ts"
     ],
     "test:harness-db-isolation": [
       "codebase-index-mcp/scripts/test/test-harness-db-isolation.mjs",
@@ -217,7 +310,8 @@
     "test:html-svg": [
       "codebase-index-mcp/scripts/test/test-html-svg.mjs",
       "@dist",
-      "codebase-index-mcp/src/tools/handlers/impactHandler.ts"
+      "codebase-index-mcp/src/tools/handlers/impactHandler.ts",
+      "codebase-index-mcp/src/services/indexing/indexPipeline.ts"
     ],
     "test:http-consumers": [
       "codebase-index-mcp/scripts/test/test-http-consumers.mjs",
@@ -238,24 +332,29 @@
     ],
     "test:index-jobs": [
       "codebase-index-mcp/scripts/test/test-index-jobs.mjs",
-      "@dist"
+      "@dist",
+      "codebase-index-mcp/src/services/indexing/indexPipeline.ts"
     ],
     "test:refresh-deadline": [
       "codebase-index-mcp/scripts/test/test-refresh-deadline.mjs",
       "@dist",
-      "codebase-index-mcp/scripts/bundle.mjs"
+      "codebase-index-mcp/scripts/bundle.mjs",
+      "codebase-index-mcp/src/middleware/freshness.ts"
     ],
     "test:query-graph-timeout": [
       "codebase-index-mcp/scripts/test/test-query-graph-timeout.mjs",
       "@dist",
       "codebase-index-mcp/src/tools/handlers/impactHandler.ts",
-      "codebase-index-mcp/scripts/bundle.mjs"
+      "codebase-index-mcp/scripts/bundle.mjs",
+      "codebase-index-mcp/src/middleware/freshness.ts"
     ],
     "test:index-lock-contention": [
       "codebase-index-mcp/scripts/test/test-index-lock-contention.mjs",
       "@dist",
       "codebase-index-mcp/src/tools/handlers/searchHandler.ts",
-      "codebase-index-mcp/scripts/bundle.mjs"
+      "codebase-index-mcp/scripts/bundle.mjs",
+      "codebase-index-mcp/src/middleware/freshness.ts",
+      "codebase-index-mcp/src/repositories/vectorSearchWorkerClient.ts"
     ],
     "test:interface-dispatch": [
       "codebase-index-mcp/scripts/test/test-interface-dispatch.mjs",
@@ -267,7 +366,8 @@
       "@self",
       "codebase-index-mcp/src/tools/handlers/impactHandler.ts",
       "codebase-index-mcp/src/tools/handlers/searchHandler.ts",
-      "codebase-index-mcp/src/services/analysis/docSection.ts"
+      "codebase-index-mcp/src/services/analysis/docSection.ts",
+      "codebase-index-mcp/src/resources/resourceHandler.ts"
     ],
     "test:issue-052-qualified-call": [
       "codebase-index-mcp/scripts/test/test-issue-052-qualified-call.mjs",
@@ -289,7 +389,8 @@
     ],
     "test:literal-cap-profiles": [
       "codebase-index-mcp/scripts/test/test-literal-cap-profiles.mjs",
-      "@dist"
+      "@dist",
+      "codebase-index-mcp/src/services/indexing/indexPipeline.ts"
     ],
     "test:minimal-api-guard": [
       "codebase-index-mcp/scripts/test/test-minimal-api-guard.mjs",
@@ -297,7 +398,8 @@
     ],
     "test:node-identity": [
       "codebase-index-mcp/scripts/test/test-node-identity.mjs",
-      "@dist"
+      "@dist",
+      "codebase-index-mcp/src/services/indexing/indexPipeline.ts"
     ],
     "test:nuget-bridge": [
       "codebase-index-mcp/scripts/test/test-nuget-bridge.mjs",
@@ -322,7 +424,8 @@
       "codebase-index-mcp/scripts/test/test-python-gaps.mjs",
       "codebase-index-mcp/scripts/test/fixtures/python-gaps/**",
       "codebase-index-mcp/src/tools/handlers/searchHandler.ts",
-      "@dist"
+      "@dist",
+      "codebase-index-mcp/src/services/indexing/indexPipeline.ts"
     ],
     "test:profile-responses": [
       "codebase-index-mcp/scripts/test/test-profile-responses.mjs",
@@ -334,7 +437,9 @@
     "test:query-refresh": [
       "codebase-index-mcp/scripts/test/test-query-refresh.mjs",
       "@dist",
-      "codebase-index-mcp/src/tools/handlers/searchHandler.ts"
+      "codebase-index-mcp/src/tools/handlers/searchHandler.ts",
+      "codebase-index-mcp/src/middleware/freshness.ts",
+      "codebase-index-mcp/src/services/indexing/indexPipeline.ts"
     ],
     "test:refactor-engine": [
       "codebase-index-mcp/scripts/test/test-refactor-engine.mjs",
@@ -345,12 +450,14 @@
     "test:refactor-profiles": [
       "codebase-index-mcp/scripts/test/test-refactor-preview-profiles.mjs",
       "@dist",
-      "@self"
+      "@self",
+      "codebase-index-mcp/src/middleware/freshness.ts"
     ],
     "test:register-worktree": [
       "codebase-index-mcp/scripts/test/test-register-worktree.mjs",
       "@dist",
-      "codebase-index-mcp/src/tools/handlers/searchHandler.ts"
+      "codebase-index-mcp/src/tools/handlers/searchHandler.ts",
+      "codebase-index-mcp/src/services/indexing/indexPipeline.ts"
     ],
     "test:route-map-roundtrip": [
       "codebase-index-mcp/scripts/test/test-route-map-roundtrip.mjs",
@@ -369,17 +476,23 @@
     "test:seed-conformance": [
       "codebase-index-mcp/scripts/test/test-seed-conformance.mjs",
       "@dist",
-      "codebase-index-mcp/src/tools/handlers/searchHandler.ts"
+      "codebase-index-mcp/src/tools/handlers/searchHandler.ts",
+      "codebase-index-mcp/src/services/indexing/indexPipeline.ts"
     ],
     "test:bundle-boot": [
       "codebase-index-mcp/scripts/test/test-bundle-boot.mjs",
       "@dist",
-      "codebase-index-mcp/scripts/bundle.mjs"
+      "codebase-index-mcp/scripts/bundle.mjs",
+      "codebase-index-mcp/src/repositories/vectorSearchWorkerClient.ts",
+      "codebase-index-mcp/package.json"
     ],
     "test:server-envelopes": [
       "codebase-index-mcp/scripts/test/test-server-envelopes.mjs",
       "@dist",
-      "codebase-index-mcp/src/tools/handlers/impactHandler.ts"
+      "codebase-index-mcp/src/tools/handlers/impactHandler.ts",
+      "codebase-index-mcp/src/resources/resourceHandler.ts",
+      "codebase-index-mcp/src/services/indexing/indexPipeline.ts",
+      "codebase-index-mcp/package.json"
     ],
     "test:setup-config": [
       "codebase-index-mcp/scripts/test/test-setup-config.mjs",
@@ -391,7 +504,8 @@
       "codebase-index-mcp/scripts/test/test-sql-lane.mjs",
       "@dist",
       "codebase-index-mcp/src/tools/handlers/impactHandler.ts",
-      "codebase-index-mcp/src/tools/handlers/searchHandler.ts"
+      "codebase-index-mcp/src/tools/handlers/searchHandler.ts",
+      "codebase-index-mcp/src/services/indexing/indexPipeline.ts"
     ],
     "test:sqlite-guardrails": [
       "codebase-index-mcp/scripts/test/test-sqlite-guardrails.mjs",
@@ -418,7 +532,8 @@
       "codebase-index-mcp/scripts/test/test-text-json-lane.mjs",
       "@dist",
       "codebase-index-mcp/src/tools/handlers/impactHandler.ts",
-      "codebase-index-mcp/src/tools/handlers/searchHandler.ts"
+      "codebase-index-mcp/src/tools/handlers/searchHandler.ts",
+      "codebase-index-mcp/src/services/indexing/indexPipeline.ts"
     ],
     "test:typescript-edges": [
       "codebase-index-mcp/scripts/test/test-typescript-edges.mjs",
