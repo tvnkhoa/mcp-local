@@ -26,6 +26,9 @@
     "scripts/mcp-doctor.mjs",
     "scripts/install-mcp.mjs",
     "scripts/lib/childTree.test.mjs",
+    "scripts/lib/heavyLockBudget.test.mjs",
+    "scripts/run-servers.mjs",
+    ".claude/process.json",
     ".github/**",
     "contracts/**"
   ],
