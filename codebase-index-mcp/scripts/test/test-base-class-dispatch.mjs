@@ -81,6 +81,86 @@ public class UnrelatedThing
 `
 );
 
+// --- MCP-ISSUE-137: overrides bound by owner TYPE, not by the subclass's file ------------------------
+// `RepoBase.Save` calls its own virtual `AddAsync`. `Shared.cs` holds a RepoBase subclass with no override
+// beside `AudienceRepo`, which overrides a same-named member of an UNRELATED base; `Pair.cs` holds two
+// RepoBase subclasses that both override it. Keyed by file, the fan-out took the first `AddAsync` in each
+// file: AudienceRepo's method reached through NoOverrideRepo, and one of the pair missed.
+const repoBase = indexFile(
+  "src/RepoBase.cs",
+  `
+public abstract class RepoBase
+{
+    public virtual void AddAsync(int x) { }
+    public virtual void Put(int x) { }
+    public virtual void Put(int x, int y) { }
+    public void Save(int x) { AddAsync(x); Put(x); }
+}
+public abstract class OtherBase
+{
+    public virtual void AddAsync(int x) { }
+}
+`
+);
+const shared = indexFile(
+  "src/Shared.cs",
+  `
+public class AudienceRepo : OtherBase
+{
+    public override void AddAsync(int x) { }
+}
+public class NoOverrideRepo : RepoBase
+{
+}
+`
+);
+const pair = indexFile(
+  "src/Pair.cs",
+  `
+public class FirstRepo : RepoBase
+{
+    public override void AddAsync(int x) { }
+}
+public class SecondRepo : RepoBase
+{
+    public override void AddAsync(int x) { }
+}
+`
+);
+// A partial subclass: the base list in one part, the override in the other part's file.
+indexFile("src/PartialRepo.cs", `public partial class PartialRepo : RepoBase { }`);
+const partialOverride = indexFile(
+  "src/PartialRepo.Add.cs",
+  `
+public partial class PartialRepo
+{
+    public override void AddAsync(int x) { }
+}
+`
+);
+// Row 13 review: a namesake partial in a SIBLING folder is not another part of this type. `NsA/Handler` (no
+// override) extends RepoBase; `NsB/Handler` extends OtherBase and overrides AddAsync.
+indexFile("src/NsA/Handler.cs", `public partial class Handler : RepoBase { }`);
+const nsbHandler = indexFile(
+  "src/NsB/Handler.cs",
+  `
+public partial class Handler : OtherBase
+{
+    public override void AddAsync(int x) { }
+}
+`
+);
+// Row 13 review: an override of the OTHER overload. `Save` calls `Put(int)`; PutRepo overrides only `Put(int, int)`.
+const putRepo = indexFile(
+  "src/PutRepo.cs",
+  `
+public class PutRepo : RepoBase
+{
+    public override void Put(int x, int y) { }
+}
+`
+);
+
 store.rebuildFts();
 store.resolveImplementsEdges(repoId);
 store.resolveExtendsEdges(repoId);
@@ -153,6 +233,44 @@ check(
   "the base's abstract declaration still holds its own direct call",
   abstractDecl !== undefined && callersOf(abstractDecl.symbolId).length > 0,
   abstractDecl ? `callers: ${callersOf(abstractDecl.symbolId).length}` : "symbol missing"
+);
+
+// --- MCP-ISSUE-137 --------------------------------------------------------------------------------
+const saveCaller = method(repoBase, "Save");
+const ownedBy = (extracted, ownerName, name) => {
+  const owner = extracted.symbols.find((s) => s.kind === "class" && s.name === ownerName);
+  return extracted.symbols.find((s) => s.kind === "method" && s.name === name && s.parentSymbolId === owner?.symbolId);
+};
+const dispatchedFromSave = (sym) =>
+  sym !== undefined && callersOf(sym.symbolId).some((e) => e.reason === "base-class-dispatch" && e.fromId === saveCaller?.symbolId);
+for (const owner of ["FirstRepo", "SecondRepo"]) {
+  const o = ownedBy(pair, owner, "AddAsync");
+  check(`MCP-ISSUE-137: ${owner}.AddAsync, one of two overrides in one file, is reached`, dispatchedFromSave(o), o ? JSON.stringify(callersOf(o.symbolId)) : "symbol missing");
+}
+const audience = ownedBy(shared, "AudienceRepo", "AddAsync");
+check(
+  "MCP-ISSUE-137: AudienceRepo.AddAsync (another base's override, same file as RepoBase subclasses) is NOT reached",
+  audience !== undefined && !dispatchedFromSave(audience),
+  audience ? JSON.stringify(callersOf(audience.symbolId)) : "symbol missing"
+);
+const partialAdd = method(partialOverride, "AddAsync");
+check(
+  "MCP-ISSUE-137: a partial subclass's override in its other part's file is reached",
+  dispatchedFromSave(partialAdd),
+  partialAdd ? JSON.stringify(callersOf(partialAdd.symbolId)) : "symbol missing"
+);
+const nsbAdd = method(nsbHandler, "AddAsync");
+check(
+  "row 13 review: a namesake partial's override in a sibling folder (NsB/Handler : OtherBase) is NOT reached",
+  nsbAdd !== undefined && !dispatchedFromSave(nsbAdd),
+  nsbAdd ? JSON.stringify(callersOf(nsbAdd.symbolId)) : "symbol missing"
+);
+const putPair = method(putRepo, "Put");
+const putTargets = store.getCallEdges(repoId, saveCaller?.symbolId, "callees", 50).filter((e) => e.toName === "Put" || /Put/.test(e.toId));
+check(
+  "row 13 review: an override of Put(int, int) is NOT reached from a call on Put(int)",
+  putPair !== undefined && !dispatchedFromSave(putPair),
+  putPair ? `callers ${JSON.stringify(callersOf(putPair.symbolId))}; Save callees ${JSON.stringify(putTargets)}` : "symbol missing"
 );
 
 console.log(log.join("\n"));
